@@ -1,0 +1,335 @@
+import { ScrollView, ComboBox, Slider, LineEdit, CheckBox, Palette, AboutSlint } from "std-widgets.slint";
+export struct EffectRow { name: string, enabled: bool }
+export struct ParameterRow { index: int, name: string, value: float, minimum: float, maximum: float, step: float, default-value: float, display: string }
+global Theme {
+    in-out property <bool> dark: true;
+    out property <color> bg: dark ? #14191c : #eef1f2;
+    out property <color> panel: dark ? #1c2327 : #ffffff;
+    out property <color> elevated: dark ? #252f35 : #e3e9eb;
+    out property <color> edge: dark ? #354148 : #cbd5d9;
+    out property <color> ink: dark ? #e9efed : #1b302d;
+    out property <color> dim: dark ? #95a8ad : #59716f;
+    out property <color> accent: dark ? #8be0bd : #267658;
+}
+component Action inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> enabled: true;
+    in property <bool> primary;
+    callback clicked;
+    min-width: 40px; min-height: 38px;
+    border-radius: 9px;
+    background: primary ? Theme.accent : active ? Theme.elevated : area.has-hover ? Theme.elevated : transparent;
+    border-width: primary ? 0px : 1px;
+    border-color: active || keyboard.has-focus ? Theme.accent : Theme.edge;
+    opacity: enabled ? 1 : 0.4;
+    forward-focus: keyboard;
+    accessible-role: button; accessible-label: label; accessible-enabled: enabled;
+    accessible-action-default => {if root.enabled {root.clicked();}}
+    Text { text: root.label; color: root.primary ? (Theme.dark ? #14291f : #ffffff) : Theme.ink; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+    area := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => {root.clicked();} }
+    keyboard := FocusScope {
+        width: 0px; enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return {
+                root.clicked(); return accept;
+            }
+            return reject;
+        }
+    }
+}
+component Dial inherits Rectangle {
+    in property <ParameterRow> parameter;
+    in property <bool> compact;
+    callback edited(float);
+    callback numeric(string);
+    min-width: 115px;
+    VerticalLayout {
+        alignment: center; spacing: 13px;
+        Text {text: root.parameter.name; color: Theme.ink; font-size: 13px; horizontal-alignment: center; height: 20px;}
+        knob := Rectangle {
+            width: root.compact ? 80px : 104px; height: self.width;
+            border-radius: self.width/2; border-width: 3px; border-color: keys.has-focus ? Theme.accent : Theme.edge;
+            background: Theme.bg;
+            forward-focus: keys;
+            accessible-role: slider; accessible-label: root.parameter.name;
+            accessible-value: root.parameter.value;
+            accessible-value-minimum: root.parameter.minimum;
+            accessible-value-maximum: root.parameter.maximum;
+            accessible-value-step: root.parameter.step;
+            accessible-action-increment => {root.edited(root.parameter.value + root.parameter.step);}
+            accessible-action-decrement => {root.edited(root.parameter.value - root.parameter.step);}
+            Rectangle {
+                x: 7px; y: 7px; width: parent.width - 14px; height: parent.height - 14px;
+                border-radius: self.width/2; border-width: 1px; border-color: Theme.edge;
+                background: Theme.panel;
+                transform-rotation: (-135 + 270*(root.parameter.value - root.parameter.minimum)/(root.parameter.maximum - root.parameter.minimum))*1deg;
+                Rectangle { x: (parent.width - 3px)/2; y: 8px; width: 3px; height: 19px; border-radius: 2px; background: Theme.accent; }
+            }
+            drag := TouchArea {
+                property <length> origin-y;
+                property <float> origin-value;
+                mouse-cursor: ns-resize;
+                pointer-event(event) => {if event.kind == PointerEventKind.down { keys.focus();self.origin-y=self.mouse-y;self.origin-value=root.parameter.value; }}
+                moved => {if self.pressed {root.edited(clamp(self.origin-value+(self.origin-y - self.mouse-y)/180px*(root.parameter.maximum - root.parameter.minimum),root.parameter.minimum,root.parameter.maximum));}}
+                double-clicked => {root.edited(root.parameter.default-value);}
+                scroll-event(event) => {root.edited(clamp(root.parameter.value+event.delta-y/40px*root.parameter.step,root.parameter.minimum,root.parameter.maximum));accept}
+            }
+            keys := FocusScope {
+                width: 0px;
+                key-pressed(event) => {
+                    if event.text == Key.UpArrow || event.text == Key.RightArrow {
+                        root.edited(root.parameter.value + root.parameter.step); return accept;
+                    }
+                    if event.text == Key.DownArrow || event.text == Key.LeftArrow {
+                        root.edited(root.parameter.value - root.parameter.step); return accept;
+                    }
+                    if event.text == Key.Home {root.edited(root.parameter.minimum); return accept;}
+                    if event.text == Key.End {root.edited(root.parameter.maximum); return accept;}
+                    return reject;
+                }
+            }
+        }
+        LineEdit { text: root.parameter.display; horizontal-alignment: center; width: 110px; height: 32px; accepted => {root.numeric(self.text);} }
+    }
+}
+export component AppWindow inherits Window {
+    title: "Guitar Smart Effecter";
+    preferred-width: 1120px; preferred-height: 780px;
+    min-width: 900px; min-height: 740px;
+    background: Theme.bg;
+    default-font-family: "Yu Gothic UI";
+    default-font-size: 14px;
+    in-out property <bool> dark: true;
+    in-out property <bool> waveform-enabled: true;
+    in-out property <bool> wave-input: false;
+    in-out property <bool> settings-open: false;
+    in-out property <bool> presets-open: false;
+    in-out property <bool> tuner-open: false;
+    in-out property <bool> about-open: false;
+    in-out property <bool> tuner-muted: true;
+    in-out property <bool> muted: false;
+    in-out property <bool> bypassed: false;
+    in-out property <bool> running: false;
+    in-out property <bool> busy: false;
+    in-out property <bool> demo: false;
+    in property <[EffectRow]> effects;
+    in property <[ParameterRow]> parameters;
+    in-out property <int> selected: 3;
+    in-out property <bool> eq-open: false;
+    in property <string> effect-name: "AMP";
+    in property <string> effect-hint;
+    in property <string> effect-number: "04 / 07";
+    in property <[string]> mode-names;
+    in-out property <int> mode-index;
+    in property <[string]> preset-names;
+    in-out property <int> preset-index;
+    in-out property <string> preset-name: "My tone";
+    in property <bool> user-preset: false;
+    in property <bool> dirty: false;
+    in property <image> waveform;
+    in property <float> input-level;
+    in property <float> output-level;
+    in property <bool> input-clip;
+    in property <bool> output-clip;
+    in-out property <float> output-db: -12;
+    in-out property <float> input-db: 0;
+    in property <string> status: "ASIOを確認中…";
+    in property <string> device-label: "M-Track SOLO";
+    in property <string> latency: "—";
+    in property <string> diagnostics;
+    in-out property <string> message;
+    in property <string> tuner-note: "—";
+    in property <string> tuner-detail: "弦を1本鳴らしてください";
+    in property <float> tuner-cents;
+    in property <[string]> device-names;
+    in property <[string]> output-names;
+    in-out property <int> output-index;
+    in property <[string]> rate-names;
+    in property <[string]> buffer-names;
+    in property <[string]> channel-names;
+    in-out property <int> device-index;
+    in-out property <int> rate-index;
+    in-out property <int> buffer-index;
+    in-out property <int> channel-index: 1;
+    callback select-effect(int);
+    callback toggle-effect(int);
+    callback param-edited(int,float);
+    callback param-numeric(int,string);
+    in-out property <bool> bass-mode: false;
+    in property <[string]> mic-names;
+    in-out property <int> mic-index;
+    in-out property <float> mic-channel: 1;
+    in property <float> instrument-db;
+    in property <float> mic-db;
+    callback bass-changed(bool);
+    callback bass-preset(bool);
+    callback mixer-changed(bool, float);
+    callback mode-changed(int);
+    callback tap-delay;
+    callback eq-changed;
+    callback preset-selected(int);
+    callback preset-action(int,string);
+    callback output-changed(float);
+    callback input-changed(float);
+    callback device-changed(int);
+    callback audio-config-changed;
+    callback toggle-engine;
+    callback rescan;
+    callback theme-changed(bool);
+    callback wave-changed(bool);
+    callback open-driver-help;
+    init => {Palette.color-scheme=root.dark?ColorScheme.dark:ColorScheme.light;}
+    changed dark => {Theme.dark=root.dark;Palette.color-scheme=root.dark?ColorScheme.dark:ColorScheme.light;}
+    VerticalLayout {
+        padding: 24px; spacing: 16px;
+        HorizontalLayout {
+            height: 48px; spacing: 12px;
+            Rectangle {width:36px; HorizontalLayout {padding-top:10px;padding-bottom:10px;spacing:4px;Rectangle{width:3px;background:Theme.accent;border-radius:2px;}Rectangle{width:3px;background:Theme.accent;border-radius:2px;}Rectangle{width:3px;background:Theme.accent;border-radius:2px;}}}
+            VerticalLayout {spacing: 0px;width: 145px;Text{text:"GUITAR";font-size:20px;font-weight:600;color:Theme.ink;}Text{text:"SMART EFFECTER";font-size:10px;letter-spacing:1.5px;color:Theme.dim;}}
+            Rectangle {horizontal-stretch: 1;}
+            ComboBox {width: 190px;model: root.preset-names;current-index <=> root.preset-index;selected(value)=>{root.preset-selected(self.current-index);}}
+            Text {text: root.dirty ? "•" : "";width:8px;color:Theme.accent;vertical-alignment:center;}
+            Action {label:"保存";width:56px;clicked=>{root.presets-open=true;}}
+            Action {label:"BYPASS";width:78px;active:root.bypassed;clicked=>{root.bypassed=!root.bypassed;}}
+            Action {label:root.muted?"MUTE ●":"MUTE";width:72px;active:root.muted;clicked=>{root.muted=!root.muted;}}
+            Action {label:"設定";width:56px;clicked=>{root.settings-open=true;}}
+        }
+        Rectangle {height:1px;background:Theme.edge;}
+        if root.waveform-enabled: VerticalLayout {
+            height: 146px;spacing:5px;
+            HorizontalLayout {
+                height:32px;spacing:6px;
+                Text{text:root.demo?"DEMO · 音声出力なし":root.device-label;color:Theme.dim;font-size:12px;vertical-alignment:center;}
+                Rectangle{horizontal-stretch:1;}
+                Action{label:"IN";width:42px;min-height:30px;active:root.wave-input;clicked=>{root.wave-input=true;}}
+                Action{label:"OUT";width:42px;min-height:30px;active:!root.wave-input;clicked=>{root.wave-input=false;}}
+                Action{label:"TUNER";width:74px;min-height:30px;clicked=>{root.tuner-open=true;}}
+            }
+            Image{source:root.waveform;image-fit:fill;vertical-stretch:1;}
+            HorizontalLayout {height:15px;Text{text:"−2 s";font-size:10px;color:Theme.dim;}Rectangle{horizontal-stretch:1;}Text{text:"0";font-size:10px;color:Theme.dim;}}
+        }
+        HorizontalLayout {
+            height:94px;spacing:12px;
+            for effect[i] in root.effects: Rectangle {
+                background: Theme.panel;border-radius:12px;border-width:1px;border-color:root.selected==i?Theme.accent:Theme.edge;
+                VerticalLayout {
+                    padding:8px;spacing:2px;
+                    Rectangle {vertical-stretch:1;
+                        Text{text:effect.name;font-size:13px;letter-spacing:1px;color:effect.enabled?Theme.ink:Theme.dim;horizontal-alignment:center;vertical-alignment:center;}
+                        TouchArea{mouse-cursor:pointer;clicked=>{root.select-effect(i);}}
+                    }
+                    Rectangle{height:25px;
+                        HorizontalLayout{alignment:center;spacing:7px;Rectangle{width:5px;height:5px;border-radius:3px;background:effect.enabled?Theme.accent:Theme.dim;}Text{text:effect.enabled?"ON":"OFF";font-size:10px;color:Theme.dim;}}
+                        TouchArea{mouse-cursor:pointer;clicked=>{root.toggle-effect(i);}}
+                    }
+                }
+            }
+        }
+        Rectangle {
+            background:Theme.panel;border-radius:18px;border-width:1px;border-color:Theme.edge;vertical-stretch:1;min-height:284px;
+            VerticalLayout {
+                padding:24px;spacing:12px;
+                HorizontalLayout {height:50px;
+                    VerticalLayout{width:125px;spacing:4px;Text{text:root.effect-number;color:Theme.dim;font-size:10px;letter-spacing:2px;}Text{text:root.effect-name;color:Theme.ink;font-size:24px;letter-spacing:2px;font-weight:500;}}
+                    Rectangle{horizontal-stretch:1;}
+                    if root.selected==3: Action{label:"EQ";width:52px;active:root.eq-open;clicked=>{root.eq-open=!root.eq-open;root.eq-changed();}}
+                    if root.mode-names.length>0: ComboBox{width:148px;model:root.mode-names;current-index <=> root.mode-index;selected(value)=>{root.mode-changed(self.current-index);}}
+                    if root.selected==5: Action{label:"TAP";width:64px;clicked=>{root.tap-delay();}}
+                }
+                HorizontalLayout{alignment:center;spacing:28px;
+                    for parameter[i] in root.parameters: Dial{parameter:parameter;compact:root.parameters.length>3;edited(value)=>{root.param-edited(parameter.index,value);}numeric(text)=>{root.param-numeric(parameter.index,text);}}
+                }
+            }
+        }
+        HorizontalLayout {
+            height:42px;spacing:16px;
+            Rectangle{width:6px;Rectangle{y:(parent.height - 6px)/2;width:6px;height:6px;border-radius:3px;background:root.running?Theme.accent:Theme.dim;}}
+            Text{text:root.status;color:Theme.dim;font-size:12px;vertical-alignment:center;min-width:130px;}
+            Rectangle{horizontal-stretch:1;}
+            Text{text:"IN";font-size:10px;color:root.input-clip?#f09583:Theme.dim;vertical-alignment:center;}
+            Rectangle{width:65px;Rectangle{y:(parent.height - 5px)/2;height:5px;border-radius:3px;background:Theme.edge;Rectangle{width:parent.width*clamp(root.input-level,0,1);height:parent.height;border-radius:3px;background:root.input-clip?#f09583:Theme.accent;}}}
+            Text{text:"OUT";font-size:10px;color:root.output-clip?#f09583:Theme.dim;vertical-alignment:center;}
+            Rectangle{width:65px;Rectangle{y:(parent.height - 5px)/2;height:5px;border-radius:3px;background:Theme.edge;Rectangle{width:parent.width*clamp(root.output-level,0,1);height:parent.height;border-radius:3px;background:root.output-clip?#f09583:Theme.accent;}}}
+            Text{text:round(root.output-db)+" dB";font-size:12px;color:Theme.ink;vertical-alignment:center;width:48px;}
+            Slider{width:110px;minimum:-60;maximum:0;value:root.output-db;changed(value)=>{root.output-changed(value);}}
+            Action{label:root.busy?"準備中…":root.running?"停止":"接続";primary:!root.running;enabled:!root.busy&&!root.demo;width:80px;clicked=>{root.toggle-engine();}}
+        }
+    }
+    if root.message!="" && !root.settings-open && !root.presets-open && !root.tuner-open && !root.about-open: Rectangle {
+        x:24px;y:90px;width:parent.width - 48px;height:50px;
+        background:Theme.elevated;border-radius:9px;border-width:1px;border-color:Theme.edge;
+        HorizontalLayout {padding:8px;spacing:10px;Text{text:root.message;color:Theme.accent;font-size:12px;wrap:word-wrap;vertical-alignment:center;}Action{label:"閉じる";width:64px;clicked=>{root.message="";}}}
+    }
+    if root.settings-open: Rectangle {
+        background:#0009;TouchArea{}
+        Rectangle {width:660px;height:min(720px, parent.height - 24px);x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;background:Theme.panel;border-radius:18px;border-width:1px;border-color:Theme.edge;
+            ScrollView { VerticalLayout{padding:24px;spacing:12px;
+                HorizontalLayout{height:36px;Text{text:"オーディオ";font-size:20px;color:Theme.ink;vertical-alignment:center;}Rectangle{horizontal-stretch:1;}Action{label:"閉じる";width:64px;clicked=>{root.settings-open=false;}}}
+                Text{text:"AG03MK2: DRY CH 1-2G · 楽器 Input 2 / マイク Input 1";font-size:12px;color:Theme.dim;}
+                HorizontalLayout{height:38px;spacing:10px;ComboBox{model:root.device-names;current-index <=> root.device-index;enabled:!root.running&&!root.busy;horizontal-stretch:1;selected(value)=>{root.device-changed(self.current-index);}}Action{label:"再検出";width:70px;enabled:!root.running&&!root.busy;clicked=>{root.rescan();}}}
+                HorizontalLayout{height:38px;spacing:12px;Text{text:"出力";color:Theme.dim;width:42px;vertical-alignment:center;}ComboBox{model:root.output-names;current-index <=> root.output-index;enabled:!root.running&&!root.busy;horizontal-stretch:1;selected(value)=>{root.audio-config-changed();}}}
+                Text{text:root.output-index==0?"同じ機器のASIO出力で最小遅延。":"Windows出力は同期補正を行うため、遅延が増えます。";font-size:11px;color:Theme.dim;}
+                HorizontalLayout{height:20px;Text{text:"入力";color:Theme.dim;}Text{text:"サンプルレート";color:Theme.dim;}Text{text:"バッファ候補";color:Theme.dim;}}
+                HorizontalLayout{height:38px;spacing:12px;
+                    ComboBox{model:root.channel-names;current-index <=> root.channel-index;enabled:!root.running&&!root.busy;selected(value)=>{root.audio-config-changed();}}
+                    ComboBox{model:root.rate-names;current-index <=> root.rate-index;enabled:!root.running&&!root.busy;selected(value)=>{root.audio-config-changed();}}
+                    ComboBox{model:root.buffer-names;current-index <=> root.buffer-index;enabled:!root.running&&!root.busy;selected(value)=>{root.audio-config-changed();}}
+                }
+                HorizontalLayout{height:34px;spacing:12px;Text{text:"入力ゲイン";color:Theme.dim;width:80px;vertical-alignment:center;}Slider{minimum:-24;maximum:24;value:root.input-db;changed(value)=>{root.input-changed(value);}}Text{text:round(root.input-db)+" dB";color:Theme.ink;width:50px;vertical-alignment:center;}}
+                HorizontalLayout{height:34px;spacing:10px;CheckBox{text:"ベース用";checked <=> root.bass-mode;toggled=>{root.bass-changed(self.checked);}}Action{label:"Bass Clean";clicked=>{root.bass-preset(false);}}Action{label:"Bass Drive";clicked=>{root.bass-preset(true);}}}
+                HorizontalLayout{height:38px;spacing:10px;Text{text:"マイク";width:60px;color:Theme.dim;vertical-alignment:center;}ComboBox{model:root.mic-names;current-index <=> root.mic-index;enabled:!root.running&&!root.busy;horizontal-stretch:1;selected(value)=>{root.audio-config-changed();}}}
+                HorizontalLayout{height:30px;spacing:10px;Text{text:"マイクCH (Enter)";color:Theme.dim;width:100px;vertical-alignment:center;}LineEdit{text:round(root.mic-channel);enabled:!root.running&&!root.busy;accepted=>{root.mic-channel=max(1,min(64,self.text.to-float()));root.audio-config-changed();}}Text{text:"別USBマイクは同期バッファあり";color:Theme.dim;font-size:11px;}}
+                HorizontalLayout{height:30px;spacing:10px;Text{text:"楽器音量";width:80px;color:Theme.dim;vertical-alignment:center;}Slider{minimum:-60;maximum:6;value:root.instrument-db;changed(value)=>{root.mixer-changed(false,value);}}Text{text:round(root.instrument-db)+" dB";width:50px;color:Theme.ink;}}
+                HorizontalLayout{height:30px;spacing:10px;Text{text:"マイク音量";width:80px;color:Theme.dim;vertical-alignment:center;}Slider{minimum:-60;maximum:6;value:root.mic-db;changed(value)=>{root.mixer-changed(true,value);}}Text{text:round(root.mic-db)+" dB";width:50px;color:Theme.ink;}}
+                Rectangle{height:1px;background:Theme.edge;}
+                HorizontalLayout{height:30px;Text{text:"推定往復遅延";color:Theme.dim;}Rectangle{horizontal-stretch:1;}Text{text:root.latency;color:Theme.ink;font-size:20px;}}
+                Text{text:root.diagnostics;color:Theme.dim;font-size:12px;wrap:word-wrap;min-height:48px;}
+                Text{text:"バッファの対応可否は接続時に確認します。実測遅延はループバック測定が必要です。";color:Theme.dim;font-size:11px;wrap:word-wrap;}
+                HorizontalLayout{height:32px;CheckBox{text:"波形表示";checked <=> root.waveform-enabled;toggled=>{root.wave-changed(self.checked);}}CheckBox{text:"ダーク";checked <=> root.dark;toggled=>{root.theme-changed(self.checked);}}Action{label:"TUNER";width:74px;clicked=>{root.settings-open=false;root.tuner-open=true;}}}
+                HorizontalLayout{height:38px;spacing:12px;Action{label:"公式ドライバー";width:130px;clicked=>{root.open-driver-help();}}Action{label:"情報";width:60px;clicked=>{root.settings-open=false;root.about-open=true;}}Rectangle{horizontal-stretch:1;}Action{label:root.running?"停止":"接続";primary:true;width:92px;enabled:!root.busy&&!root.demo;clicked=>{root.toggle-engine();}}}
+                Text{text:root.message;color:Theme.accent;font-size:12px;wrap:word-wrap;min-height:30px;}
+            }
+        }
+    }
+    }
+    if root.presets-open: Rectangle {
+        background:#0009;TouchArea{}
+        Rectangle{width:490px;height:285px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;background:Theme.panel;border-radius:18px;
+            VerticalLayout{padding:28px;spacing:18px;
+                HorizontalLayout{height:36px;Text{text:"プリセット";font-size:20px;color:Theme.ink;}Rectangle{horizontal-stretch:1;}Action{label:"閉じる";width:64px;clicked=>{root.presets-open=false;}}}
+                LineEdit{text <=> root.preset-name;placeholder-text:"音色の名前";height:38px;}
+                HorizontalLayout{height:38px;spacing:10px;Action{label:"新規保存";primary:true;clicked=>{root.preset-action(0,root.preset-name);}}Action{label:"上書き";enabled:root.user-preset;clicked=>{root.preset-action(1,root.preset-name);}}Action{label:"名前変更";enabled:root.user-preset;clicked=>{root.preset-action(2,root.preset-name);}}Action{label:"削除";enabled:root.user-preset;clicked=>{root.preset-action(3,root.preset-name);}}}
+                Text{text:root.message;color:Theme.accent;font-size:12px;wrap:word-wrap;}
+            }
+        }
+    }
+    if root.tuner-open: Rectangle {
+        background:#0009;TouchArea{}
+        Rectangle{width:440px;height:360px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;background:Theme.panel;border-radius:18px;
+            VerticalLayout{padding:28px;spacing:18px;
+                HorizontalLayout{height:36px;Text{text:"TUNER";font-size:16px;letter-spacing:2px;color:Theme.dim;}Rectangle{horizontal-stretch:1;}Action{label:"閉じる";width:64px;clicked=>{root.tuner-open=false;}}}
+                Text{text:root.tuner-note;font-size:64px;color:abs(root.tuner-cents)<5?Theme.accent:Theme.ink;horizontal-alignment:center;height:86px;}
+                Rectangle{height:10px;background:Theme.edge;border-radius:5px;
+                    Rectangle{x:parent.width/2-1px;y:-4px;width:2px;height:18px;background:Theme.dim;}
+                    Rectangle{x:(parent.width - 8px)*(clamp(root.tuner-cents,-50,50)+50)/100;width:8px;height:10px;border-radius:4px;background:Theme.accent;}
+                }
+                Text{text:root.tuner-detail;font-size:13px;color:Theme.dim;horizontal-alignment:center;height:28px;}
+                CheckBox{text:"チューニング中はミュート";checked <=> root.tuner-muted;}
+            }
+        }
+    }
+    if root.about-open: Rectangle {
+        background:#0009; TouchArea{}
+        Rectangle {
+            width:440px;height:300px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;
+            background:Theme.panel;border-radius:18px;
+            VerticalLayout {
+                padding:28px;spacing:16px;
+                HorizontalLayout {height:36px;Text{text:"Guitar Smart Effecter";font-size:18px;color:Theme.ink;}Rectangle{horizontal-stretch:1;}Action{label:"閉じる";width:64px;clicked=>{root.about-open=false;}}}
+                Text{text:"v0.1.0 · Rust / CPAL / ASIO";font-size:12px;color:Theme.dim;}
+                AboutSlint {}
+            }
+        }
+    }
+}

@@ -1,0 +1,6 @@
+/.tools/
+/target/
+/dist/
+/logs/
+/artifacts/
+*.tmp
