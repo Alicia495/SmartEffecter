@@ -72,3 +72,56 @@ Windows出力には共有モードのドライバー遅延と約13 msの同期�
 - マイクCH入力はEnter確定へ変更。入力中の文字列を毎回書き戻さない。
 - マイククリップのメーター反映、マイク診断・エラー表示を追加。
 - 実機のマイク抜き差し、AG03MK2と別USBマイクの組合せ、電気的遅延は未確認。
+
+
+## 2026-10-26 仮想出力
+
+- VB-CABLE用の専用出力モード（virtual:vb-cable）を追加。導入済みのWASAPI再生エンドポイントを解決して合成音を送信。
+- cargo test --locked: 22件成功。clippy全ターゲット警告0。最適化ビルド・配布exe更新済み。
+- 未導入・誤方向のCABLE Output・複数候補を対象に、物理/既定出力へフォールバックしないことを単体テストで確認。
+- UIスモーク: 仮想出力ボタン・設定保存と読込・既存の操作が成功。設定画面PNGを目視確認。
+- 実機の出力列挙で「仮想出力 · VB-CABLE（要セットアップ）」を確認。
+- 配布exeの --probe 1 --output virtual:vb-cable は未導入を示す説明付きエラーで終了（exit 1）。音声ストリーム開始前に検出。
+- 本PCにVB-CABLE未導入のため、CABLE Outputからの受信・通話/録音アプリでの受信・経路全体の実測遅延は未確認。
+
+
+## 2026-10-26 ベース専用ASIOモニター
+
+- 仮想/Windows出力のミックスとは別に、エフェクト後の楽器だけを入力機器のASIO出力へ送るモニターを追加。
+- モニターは独立した短いSPSCキュー（指定ASIOバッファの4倍、最低64 frames）。仮想出力と独立して消費し、送信失敗でもブロックしない。
+- 同じコールバックで送信ミックス0.325に対してモニター0.1となる既知信号の検証を追加し、マイク非混入を確認。コールバックのヒープ確保0件。
+- cargo test --locked: 22件成功。clippy全ターゲット警告0。
+- 新配布exeでUIスモーク成功。モニター有効・音量の保存/読込確認。画面PNGを目視確認。
+- M-Track実機の48 kHz / 32 samplesでWindows既定出力＋ASIOモニターの同時出力を5秒間実行。出力はミュート。各経路とも欠落0、あふれ0、エラー0、音声処理期限超過0。
+- 根拠: artifacts/bass-monitor-hardware-probe-v2.json。monitor_metricsのdriver_output_msはASIO出力側のみで、往復遅延の実測値ではない。
+- VB-CABLE未導入のためDiscord受信との同時動作・AG03MK2実機・実際の演奏音と電気的往復遅延は未確認。
+- 起動中の旧exeはdist/GuitarSmartEffecter.previous-20261026-000755.exeへ退避。新exeとtarget/debug/guitar-smart-effecter.exeのSHA256一致を確認。起動中のアプリは旧版のままで、反映には再起動が必要。
+
+
+## 2026-10-26 自分用出力の選択・マイク警告の修正
+
+- 自分用の出力先をASIO、Windows既定、個別WASAPI機器から選択可能にした。ASIOは短い専用キュー、別機器は独立したRateBridgeを利用。マイクを混ぜる前のベース信号を返す。
+- 出力先を機器IDで保存。未接続時はエラー表示、送信用と同じWindowsエンドポイントを選ぶ場合も開始前にエラー。
+- CPAL 0.18.2のWASAPI入力はDATA_DISCONTINUITY時にErrorKind::Xrunを通知する。旧コードが全通知を接続エラーとしてカウントし、UIが累積値を見て警告し続ける問題を修正。Xrunは別カウンター、切断や権限拒否等はエラー扱いを維持。
+- 起動中exeを上書きせず、退避して新exeを配置する配布スクリプトに修正。起動中アプリの強制終了はしない。
+- cargo test --locked: 23件成功。clippy全ターゲット警告0。配布ビルド・依存ライセンス生成成功。
+- UIスモークと画像確認成功。自分用出力Windows既定・音量の保存/復元を確認。旧設定にmonitor_deviceがなくてもASIOを既定として読込可能。
+- 現在の実機: M-Track、Anker PowerCast M300、VB-CABLE、final_UX5000。48 kHz / 64 samplesで仮想出力＋マイク＋Windows既定モニターを10秒、同じヘッドホンの個別ID指定を5秒確認（出力はミュート）。
+- 両試行ともマイクのXrunを1回再現。マイク接続エラー0、マイクキュー欠落/あふれ0、送信・モニターの欠落/あふれ/エラー0。処理期限超過0。音切れ通知が接続エラーとされないことを確認。
+- 根拠: artifacts/mic-virtual-windows-monitor-probe.json、artifacts/mic-specific-monitor-probe.json。
+- 同一Windows出力を送信/モニターに指定するCLI検査は、説明付きエラーで終了（exit 1）。
+- VB-CABLEはユーザー側で導入済みとなり、標準CABLE Inputと16ch版が並存。標準版を選ぶよう自動判別を修正しテスト。
+- Discord側の受信音・実際の演奏音・AG03MK2実機・電気的遅延は未確認。今回の実機試行はミュートしたストリームの動作確認。
+
+
+## 2026-10-26 和音・歪み処理の点検
+
+- 保存音色のスナップショットはbass=false、Drive Gain 65、Amp Crunch Gain 42、Chorus/Delay/Reverb有効だった。ユーザーから自分用とDiscord双方でざらつくとの報告。
+- 同一設定の合成単音→和音→余韻を修正前後でレンダー。各6秒、現在の音色/Bass Clean/Bass Driveとも有限値で最終クリップ0。ただし実演奏のADC/ミキサーでのクリップを否定する証拠ではない。
+- DRIVE/AMPに一次ADAAを導入。f64積分差分と小差分時の中点評価。ベースDriveは低域を原音として残し、高域側を歪ませる。
+- 9 kHz入力・48 kHz時の折り返し3 kHz成分は、Drive 2モード/AMP 2モードとも旧処理の半分未満のパワーに低下するテストが成功。この特定の試験条件の結果であり、全ての和音成分が半減する意味ではない。
+- 非線形積分の微分一致、ほぼDCでの数値安定性、コールバックのヒープ確保0、既存のバイパス/ミュート/低域保持/キャビネットのテストが成功。Bass Driveの低域保持は増幅の異なるギターモードでなくClean Bassを基準に比較するよう検証条件を更新。
+- cargo test --locked: 25件成功。clippy全ターゲット警告0。最適化した配布exeとUIスモーク成功。
+- M-Track / Anker / VB-CABLE / Windowsモニター、48 kHz / 64 samples、全エフェクト有効＋パラメーター連続変更を10秒間確認（ミュート出力）。最大処理145us、期限超過0、送信/モニターの欠落・あふれ・エラー0、マイク接続エラー0。
+- 根拠: artifacts/chords-before.json、artifacts/chords-after.json、artifacts/chord-dsp-hardware-probe.json。比較WAV: artifacts/chords-before/ と artifacts/chords-after/。beforeは開発ビルド、afterは最適化ビルドなのでレンダー速度の直接比較はしない。
+- 実演奏音による聴感比較、Discordでの受信音、電気的遅延は未確認。相互変調を完全に除去する修正ではない。保存音色・実ユーザーの設定は変更していない。

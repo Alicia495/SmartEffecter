@@ -35,6 +35,8 @@ pub struct Metrics {
     pub block_frames: AtomicU32,
     pub wave_drops: AtomicU64,
     pub mic_errors: AtomicU64,
+    pub mic_discontinuities: AtomicU64,
+    pub mic_error_code: AtomicU32,
     pub mic_missing_frames: AtomicU64,
     pub mic_overflow_frames: AtomicU64,
     pub mic_queue_us: AtomicU64,
@@ -58,9 +60,39 @@ pub struct MetricsReport {
     pub measured_round_trip_ms: Option<f64>,
     pub wave_drops: u64,
     pub mic_errors: u64,
+    pub mic_discontinuities: u64,
+    pub mic_error: Option<&'static str>,
     pub mic_missing_frames: u64,
     pub mic_overflow_frames: u64,
     pub mic_queue_ms: f64,
+}
+fn mic_error_message(code: u32) -> Option<&'static str> {
+    match code {
+        0 => None,
+        1 => Some("マイクが切断されたか、利用できません"),
+        2 => Some("マイクへのアクセスが拒否されました。Windowsのマイク権限を確認してください"),
+        3 => Some("マイクの形式や接続が変更されました。再接続してください"),
+        4 => Some("マイクが他のアプリで使用されています"),
+        _ => Some("マイクの音声ドライバーでエラーが発生しました"),
+    }
+}
+fn record_mic_error(metrics: &Metrics, error: &cpal::Error) {
+    use cpal::ErrorKind;
+    let code = match error.kind() {
+        ErrorKind::Xrun => {
+            metrics.mic_discontinuities.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        // The stream remains usable for these notifications.
+        ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied => return,
+        ErrorKind::DeviceNotAvailable => 1,
+        ErrorKind::PermissionDenied => 2,
+        ErrorKind::StreamInvalidated => 3,
+        ErrorKind::DeviceBusy => 4,
+        _ => 5,
+    };
+    metrics.mic_error_code.store(code, Ordering::Relaxed);
+    metrics.errors.fetch_add(1, Ordering::Relaxed);
 }
 impl Metrics {
     pub fn report(&self) -> MetricsReport {
@@ -85,6 +117,8 @@ impl Metrics {
             measured_round_trip_ms: None,
             wave_drops: self.wave_drops.load(Ordering::Relaxed),
             mic_errors: self.mic_errors.load(Ordering::Relaxed),
+            mic_discontinuities: self.mic_discontinuities.load(Ordering::Relaxed),
+            mic_error: mic_error_message(self.mic_error_code.load(Ordering::Relaxed)),
             mic_missing_frames: self.mic_missing_frames.load(Ordering::Relaxed),
             mic_overflow_frames: self.mic_overflow_frames.load(Ordering::Relaxed),
             mic_queue_ms: self.mic_queue_us.load(Ordering::Relaxed) as f64 / 1000.,
@@ -101,6 +135,7 @@ pub struct WavePoint {
     pub frames: u32,
 }
 pub struct Feed {
+    pub monitor_metrics: Option<Arc<Metrics>>,
     pub wave: Consumer<WavePoint>,
     pub tuner: Consumer<f32>,
     pub metrics: Arc<Metrics>,
@@ -122,6 +157,26 @@ pub struct OutputDeviceInfo {
     pub id: String,
     pub name: String,
 }
+pub const VIRTUAL_OUTPUT: &str = "virtual:vb-cable";
+pub const VIRTUAL_OUTPUT_HELP: &str = "https://vb-audio.com/Cable/";
+const VIRTUAL_OUTPUT_MISSING: &str = "仮想出力用のVB-CABLEが見つかりません。「仮想出力の設定」から公式ドライバーを導入し、必要なら再起動後に「再検出」してください。他アプリのマイク入力にはCABLE Outputを選びます。";
+fn is_vb_cable_output(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("vb-audio virtual cable") && name.contains("cable input")
+}
+fn find_virtual_output(outputs: &[OutputDeviceInfo]) -> Result<&OutputDeviceInfo, String> {
+    let mut matches = outputs
+        .iter()
+        .filter(|d| d.id != VIRTUAL_OUTPUT && is_vb_cable_output(&d.name));
+    let first = matches.next().ok_or(VIRTUAL_OUTPUT_MISSING)?;
+    if matches.next().is_some() {
+        return Err(
+            "仮想出力の候補が複数あります。出力一覧から使用するCABLE Inputを指定してください。"
+                .into(),
+        );
+    }
+    Ok(first)
+}
 pub fn windows_outputs() -> Result<Vec<OutputDeviceInfo>, String> {
     let host = cpal::host_from_id(cpal::HostId::Wasapi).map_err(|e| e.to_string())?;
     let mut outputs = vec![OutputDeviceInfo {
@@ -139,6 +194,19 @@ pub fn windows_outputs() -> Result<Vec<OutputDeviceInfo>, String> {
             });
         }
     }
+    let ready = find_virtual_output(&outputs).is_ok();
+    outputs.insert(
+        1,
+        OutputDeviceInfo {
+            id: VIRTUAL_OUTPUT.into(),
+            name: if ready {
+                "仮想出力 · VB-CABLE"
+            } else {
+                "仮想出力 · VB-CABLE（要セットアップ）"
+            }
+            .into(),
+        },
+    );
     Ok(outputs)
 }
 
@@ -219,8 +287,8 @@ impl Microphone {
                         _ => {}
                     }
                 },
-                move |_| {
-                    errors.errors.fetch_add(1, Ordering::Relaxed);
+                move |error| {
+                    record_mic_error(&errors, &error);
                 },
                 None,
             )
@@ -321,6 +389,8 @@ struct AudioFrame {
     time: cpal::StreamInstant,
 }
 pub struct Session {
+    monitor_stream: Option<cpal::Stream>,
+    pub monitor_metrics: Option<Arc<Metrics>>,
     mic_stream: Option<cpal::Stream>,
     input: cpal::Stream,
     output: cpal::Stream,
@@ -352,11 +422,46 @@ impl Session {
             .ok_or("ASIO機器が見つかりません。USB接続と公式ドライバーを確認してください。")?;
         let input = device.default_input_config().map_err(|e| e.to_string())?;
         let separate_output = !settings.output_device.is_empty();
+        let monitor_enabled =
+            settings.monitor_enabled && (separate_output || !settings.monitor_device.is_empty());
+        let windows_monitor = if monitor_enabled && !settings.monitor_device.is_empty() {
+            let host = cpal::host_from_id(cpal::HostId::Wasapi).map_err(|e| e.to_string())?;
+            Some(
+                if settings.monitor_device == "windows:default" {
+                    host.default_output_device()
+                } else {
+                    let id = settings
+                        .monitor_device
+                        .parse::<cpal::DeviceId>()
+                        .map_err(|e| e.to_string())?;
+                    host.device_by_id(&id)
+                }
+                .ok_or(
+                    "選択したモニター出力が見つかりません。自分用の出力先を選び直してください。",
+                )?,
+            )
+        } else {
+            None
+        };
+        controls.monitor_gain.store(
+            10f32
+                .powf(settings.monitor_db.clamp(-60., 6.) / 20.)
+                .to_bits(),
+            Ordering::Relaxed,
+        );
         let windows_device = if separate_output {
             let host = cpal::host_from_id(cpal::HostId::Wasapi).map_err(|e| e.to_string())?;
             Some(
                 if settings.output_device == "windows:default" {
                     host.default_output_device()
+                } else if settings.output_device == VIRTUAL_OUTPUT {
+                    let outputs = windows_outputs()?;
+                    let endpoint = find_virtual_output(&outputs)?;
+                    let id = endpoint
+                        .id
+                        .parse::<cpal::DeviceId>()
+                        .map_err(|e| e.to_string())?;
+                    host.device_by_id(&id)
                 } else {
                     let id = settings
                         .output_device
@@ -372,6 +477,13 @@ impl Session {
             None
         };
         let output_device = windows_device.as_ref().unwrap_or(&device);
+        if let Some(monitor) = &windows_monitor {
+            let monitor_id = monitor.id().map_err(|e| e.to_string())?;
+            let output_id = output_device.id().map_err(|e| e.to_string())?;
+            if monitor_id == output_id {
+                return Err("送信用と自分用の出力先が同じです。ベースだけを聴くには別の出力先を選んでください。".into());
+            }
+        }
         let output = output_device
             .default_output_config()
             .map_err(|e| e.to_string())?;
@@ -447,7 +559,17 @@ impl Session {
                 metrics,
             }
         });
+        let monitor_capacity = if windows_monitor.is_some() {
+            8192
+        } else {
+            (settings.buffer as usize * 4).max(64)
+        };
+        let (monitor_tx, monitor_rx) = RingBuffer::new(monitor_capacity);
+        let monitor_metrics = monitor_enabled.then(|| Arc::new(Metrics::default()));
         let mut capture = Capture {
+            monitor: monitor_enabled.then_some(monitor_tx),
+            monitor_metrics: monitor_metrics.clone(),
+            monitor_gain: 0.,
             microphone,
             mic_channel: (settings.mic_device == "asio").then_some(settings.mic_channel),
             instrument_gain: 10f32.powf(settings.instrument_db / 20.),
@@ -526,62 +648,63 @@ impl Session {
                 None,
             )
             .map_err(|e| format!("ASIO入力を開始できません: {e}"))?;
-        let mut playback = Playback {
+        let playback = Playback {
             consumer,
             metrics: metrics.clone(),
             channels: output_config.channels as usize,
             bridge: separate_output
                 .then(|| RateBridge::new(settings.sample_rate, output_config.sample_rate)),
         };
-        let out_errors = metrics.clone();
-        let output_stream = output_device
-            .build_output_stream_raw(
-                output_config,
-                output_format,
-                move |data, info| {
-                    let stamp = info.timestamp();
-                    if let Some(d) = stamp.playback.checked_duration_since(stamp.callback) {
-                        playback
-                            .metrics
-                            .output_latency_us
-                            .store(d.as_micros() as u64, Ordering::Relaxed);
-                    }
-                    match output_format {
-                        SampleFormat::F32 => {
-                            playback.run(data.as_slice_mut::<f32>().unwrap(), stamp.callback)
-                        }
-                        SampleFormat::F64 => {
-                            playback.run(data.as_slice_mut::<f64>().unwrap(), stamp.callback)
-                        }
-                        SampleFormat::I16 => {
-                            playback.run(data.as_slice_mut::<i16>().unwrap(), stamp.callback)
-                        }
-                        SampleFormat::I24 => {
-                            playback.run(data.as_slice_mut::<cpal::I24>().unwrap(), stamp.callback)
-                        }
-                        SampleFormat::I32 => {
-                            playback.run(data.as_slice_mut::<i32>().unwrap(), stamp.callback)
-                        }
-                        _ => {
-                            playback.metrics.errors.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    playback
-                        .metrics
-                        .output_blocks
-                        .fetch_add(1, Ordering::Relaxed);
-                },
-                move |_| {
-                    out_errors.errors.fetch_add(1, Ordering::Relaxed);
-                },
-                None,
+        let output_stream =
+            build_playback_stream(output_device, output_config, output_format, playback)?;
+        let monitor_stream = if let Some(monitor_metrics) = &monitor_metrics {
+            let monitor_device = windows_monitor.as_ref().unwrap_or(&device);
+            let config = monitor_device
+                .default_output_config()
+                .map_err(|e| e.to_string())?;
+            let separate_monitor = windows_monitor.is_some();
+            if !separate_monitor && config.channels() < 2 {
+                return Err("ベースモニターにはASIOステレオ出力が必要です".into());
+            }
+            let playback = Playback {
+                consumer: monitor_rx,
+                metrics: monitor_metrics.clone(),
+                channels: config.channels() as usize,
+                bridge: separate_monitor
+                    .then(|| RateBridge::new(settings.sample_rate, config.sample_rate())),
+            };
+            Some(
+                build_playback_stream(
+                    monitor_device,
+                    StreamConfig {
+                        channels: config.channels(),
+                        sample_rate: if separate_monitor {
+                            config.sample_rate()
+                        } else {
+                            settings.sample_rate
+                        },
+                        buffer_size: cpal::BufferSize::Fixed(if separate_monitor {
+                            (config.sample_rate() / 100).max(1)
+                        } else {
+                            settings.buffer
+                        }),
+                    },
+                    config.sample_format(),
+                    playback,
+                )
+                .map_err(|e| format!("ベースモニター: {e}"))?,
             )
-            .map_err(|e| format!("出力を開始できません: {e}"))?;
+        } else {
+            None
+        };
         if let Some(stream) = &mic_stream {
             stream.play().map_err(|e| e.to_string())?;
         }
         input_stream.play().map_err(|e| e.to_string())?;
         output_stream.play().map_err(|e| e.to_string())?;
+        if let Some(stream) = &monitor_stream {
+            stream.play().map_err(|e| e.to_string())?;
+        }
         let info = if separate_output {
             format!(
                 "{} → {} · Windows出力",
@@ -598,10 +721,13 @@ impl Session {
             )
         };
         Ok(Self {
+            monitor_stream,
+            monitor_metrics: monitor_metrics.clone(),
             mic_stream,
             input: input_stream,
             output: output_stream,
             feed: Some(Feed {
+                monitor_metrics,
                 wave: wave_rx,
                 tuner: tuner_rx,
                 metrics: metrics.clone(),
@@ -614,6 +740,9 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
+        if let Some(stream) = &self.monitor_stream {
+            let _ = stream.pause();
+        }
         let _ = self.output.pause();
         let _ = self.input.pause();
         if let Some(stream) = &self.mic_stream {
@@ -621,6 +750,69 @@ impl Drop for Session {
         }
     }
 }
+fn build_playback_stream(
+    device: &cpal::Device,
+    config: StreamConfig,
+    format: SampleFormat,
+    mut playback: Playback,
+) -> Result<cpal::Stream, String> {
+    if !matches!(
+        format,
+        SampleFormat::F32
+            | SampleFormat::F64
+            | SampleFormat::I16
+            | SampleFormat::I24
+            | SampleFormat::I32
+    ) {
+        return Err(format!("未対応の出力形式: {format}"));
+    }
+    let out_errors = playback.metrics.clone();
+    let output_stream = device
+        .build_output_stream_raw(
+            config,
+            format,
+            move |data, info| {
+                let stamp = info.timestamp();
+                if let Some(d) = stamp.playback.checked_duration_since(stamp.callback) {
+                    playback
+                        .metrics
+                        .output_latency_us
+                        .store(d.as_micros() as u64, Ordering::Relaxed);
+                }
+                match format {
+                    SampleFormat::F32 => {
+                        playback.run(data.as_slice_mut::<f32>().unwrap(), stamp.callback)
+                    }
+                    SampleFormat::F64 => {
+                        playback.run(data.as_slice_mut::<f64>().unwrap(), stamp.callback)
+                    }
+                    SampleFormat::I16 => {
+                        playback.run(data.as_slice_mut::<i16>().unwrap(), stamp.callback)
+                    }
+                    SampleFormat::I24 => {
+                        playback.run(data.as_slice_mut::<cpal::I24>().unwrap(), stamp.callback)
+                    }
+                    SampleFormat::I32 => {
+                        playback.run(data.as_slice_mut::<i32>().unwrap(), stamp.callback)
+                    }
+                    _ => {
+                        playback.metrics.errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                playback
+                    .metrics
+                    .output_blocks
+                    .fetch_add(1, Ordering::Relaxed);
+            },
+            move |_| {
+                out_errors.errors.fetch_add(1, Ordering::Relaxed);
+            },
+            None,
+        )
+        .map_err(|e| format!("出力を開始できません: {e}"))?;
+    Ok(output_stream)
+}
+
 struct MicFeed {
     queue: Consumer<AudioFrame>,
     bridge: RateBridge,
@@ -628,6 +820,9 @@ struct MicFeed {
     metrics: Arc<Metrics>,
 }
 struct Capture {
+    monitor: Option<Producer<AudioFrame>>,
+    monitor_metrics: Option<Arc<Metrics>>,
+    monitor_gain: f32,
     microphone: Option<MicFeed>,
     mic_channel: Option<usize>,
     instrument_gain: f32,
@@ -665,6 +860,14 @@ impl Capture {
                 .run(&mut mic.scratch[..count], 1, &mut mic.queue, &mic.metrics);
         }
         if let Some(mic) = &self.microphone {
+            self.metrics.mic_discontinuities.store(
+                mic.metrics.mic_discontinuities.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.metrics.mic_error_code.store(
+                mic.metrics.mic_error_code.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
             self.metrics.mic_errors.store(
                 mic.metrics.errors.load(Ordering::Relaxed),
                 Ordering::Relaxed,
@@ -689,11 +892,22 @@ impl Capture {
         } else {
             f32::from_bits(self.controls.mic_gain.load(Ordering::Relaxed))
         };
+        let monitor_target = f32::from_bits(self.controls.monitor_gain.load(Ordering::Relaxed));
         for (index, frame) in data.chunks_exact(self.channels).enumerate() {
             let raw = frame[self.selected].to_sample::<f32>();
             let (input, mut out) = self.processor.process(raw, bypass, mute);
             self.instrument_gain += (instrument_target - self.instrument_gain) * 0.004;
             self.mic_gain += (mic_target - self.mic_gain) * 0.004;
+            self.monitor_gain += (monitor_target - self.monitor_gain) * 0.004;
+            if let Some(monitor) = &mut self.monitor {
+                let samples =
+                    out.map(|s| (s * self.instrument_gain * self.monitor_gain).clamp(-1., 1.));
+                if monitor.push(AudioFrame { samples, time }).is_err()
+                    && let Some(metrics) = &self.monitor_metrics
+                {
+                    metrics.overflow_frames.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             let mic = self
                 .mic_channel
                 .map(|c| frame[c].to_sample::<f32>())
@@ -983,6 +1197,62 @@ pub fn spawn_worker(
 mod tests {
     use super::*;
     #[test]
+    fn microphone_discontinuity_does_not_mark_a_live_stream_as_failed() {
+        let metrics = Metrics::default();
+        let allocations = crate::allocation_check::count(|| {
+            record_mic_error(&metrics, &cpal::ErrorKind::Xrun.into());
+            record_mic_error(&metrics, &cpal::ErrorKind::DeviceChanged.into());
+            record_mic_error(&metrics, &cpal::ErrorKind::RealtimeDenied.into());
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(metrics.mic_discontinuities.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.errors.load(Ordering::Relaxed), 0);
+        record_mic_error(&metrics, &cpal::ErrorKind::DeviceNotAvailable.into());
+        assert_eq!(metrics.errors.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.mic_error_code.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn virtual_output_never_falls_back_to_physical_or_default_output() {
+        let mut outputs = vec![
+            OutputDeviceInfo {
+                id: "windows:default".into(),
+                name: "Windowsの既定の出力".into(),
+            },
+            OutputDeviceInfo {
+                id: "speaker".into(),
+                name: "Speakers (Realtek)".into(),
+            },
+            OutputDeviceInfo {
+                id: VIRTUAL_OUTPUT.into(),
+                name: "仮想出力 · VB-CABLE".into(),
+            },
+            OutputDeviceInfo {
+                id: "capture".into(),
+                name: "CABLE Output (VB-Audio Virtual Cable)".into(),
+            },
+        ];
+        assert!(find_virtual_output(&outputs).is_err());
+        outputs.push(OutputDeviceInfo {
+            id: "16ch".into(),
+            name: "CABLE In 16ch (VB-Audio Virtual Cable)".into(),
+        });
+        outputs.push(OutputDeviceInfo {
+            id: "cable".into(),
+            name: "CABLE Input (VB-Audio Virtual Cable)".into(),
+        });
+        assert_eq!(find_virtual_output(&outputs).unwrap().id, "cable");
+        outputs.push(OutputDeviceInfo {
+            id: "other".into(),
+            name: "CABLE Input (VB-Audio Virtual Cable)".into(),
+        });
+        assert!(
+            find_virtual_output(&outputs)
+                .err()
+                .unwrap()
+                .contains("複数")
+        );
+    }
+    #[test]
     fn microphone_bursts_do_not_starve_small_asio_blocks() {
         let (mut tx, mut rx) = RingBuffer::new(8192);
         let metrics = Metrics::default();
@@ -1108,11 +1378,18 @@ mod tests {
         }
         tone.output_db = 0.;
         let controls = Arc::new(SharedControls::new(&tone));
+        controls
+            .monitor_gain
+            .store(1f32.to_bits(), Ordering::Relaxed);
         let metrics = Arc::new(Metrics::default());
         let (producer, consumer) = RingBuffer::new(256);
         let (wave, _wave_rx) = RingBuffer::new(100);
         let (tuner, _tuner_rx) = RingBuffer::new(4096);
+        let (monitor_tx, mut monitor_rx) = RingBuffer::new(256);
         let mut capture = Capture {
+            monitor: Some(monitor_tx),
+            monitor_metrics: None,
+            monitor_gain: 1.,
             microphone: None,
             mic_channel: None,
             instrument_gain: 1.,
@@ -1143,6 +1420,9 @@ mod tests {
             for _ in 0..100 {
                 capture.run(&input, cpal::StreamInstant::ZERO);
                 playback.run(&mut output, cpal::StreamInstant::ZERO);
+                while let Ok(frame) = monitor_rx.pop() {
+                    assert!(frame.samples.iter().all(|s| s.abs() <= 0.201));
+                }
             }
         });
         assert_eq!(allocations, 0);
@@ -1160,10 +1440,19 @@ mod tests {
             for _ in 0..100 {
                 capture.run(&input, cpal::StreamInstant::ZERO);
                 playback.run(&mut output, cpal::StreamInstant::ZERO);
+                while let Ok(frame) = monitor_rx.pop() {
+                    assert!(frame.samples.iter().all(|s| s.abs() <= 0.201));
+                }
             }
         });
         assert_eq!(allocations, 0);
         assert!(output.iter().all(|v| (*v - 0.325).abs() < 1e-5));
+        capture.run(&input, cpal::StreamInstant::ZERO);
+        playback.run(&mut output, cpal::StreamInstant::ZERO);
+        while let Ok(frame) = monitor_rx.pop() {
+            assert!(frame.samples.iter().all(|v| (*v - 0.1).abs() < 1e-5));
+        }
+
         capture.controls.mute.store(1, Ordering::Relaxed);
         capture.run(&input, cpal::StreamInstant::ZERO);
         playback.run(&mut output, cpal::StreamInstant::ZERO);
@@ -1207,6 +1496,9 @@ mod tests {
                 }
                 capture.run(&input, cpal::StreamInstant::ZERO);
                 playback.run(&mut output, cpal::StreamInstant::ZERO);
+                while let Ok(frame) = monitor_rx.pop() {
+                    assert!(frame.samples.iter().all(|s| s.abs() <= 0.201));
+                }
             }
         });
         assert_eq!(allocations, 0);

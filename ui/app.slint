@@ -178,6 +178,14 @@ export component AppWindow inherits Window {
     callback rescan;
     callback theme-changed(bool);
     callback wave-changed(bool);
+    in property <bool> virtual-output: false;
+    callback select-virtual-output;
+    callback open-virtual-help;
+    in-out property <bool> monitor-enabled: true;
+    in property <[string]> monitor-names;
+    in-out property <int> monitor-index;
+    in property <float> monitor-db: -6;
+    callback monitor-changed(float);
     callback open-driver-help;
     init => {Palette.color-scheme=root.dark?ColorScheme.dark:ColorScheme.light;}
     changed dark => {Theme.dark=root.dark;Palette.color-scheme=root.dark?ColorScheme.dark:ColorScheme.light;}
@@ -269,7 +277,12 @@ export component AppWindow inherits Window {
                 Text{text:"AG03MK2: DRY CH 1-2G · 楽器 Input 2 / マイク Input 1";font-size:12px;color:Theme.dim;}
                 HorizontalLayout{height:38px;spacing:10px;ComboBox{model:root.device-names;current-index <=> root.device-index;enabled:!root.running&&!root.busy;horizontal-stretch:1;selected(value)=>{root.device-changed(self.current-index);}}Action{label:"再検出";width:70px;enabled:!root.running&&!root.busy;clicked=>{root.rescan();}}}
                 HorizontalLayout{height:38px;spacing:12px;Text{text:"出力";color:Theme.dim;width:42px;vertical-alignment:center;}ComboBox{model:root.output-names;current-index <=> root.output-index;enabled:!root.running&&!root.busy;horizontal-stretch:1;selected(value)=>{root.audio-config-changed();}}}
-                Text{text:root.output-index==0?"同じ機器のASIO出力で最小遅延。":"Windows出力は同期補正を行うため、遅延が増えます。";font-size:11px;color:Theme.dim;}
+                Text{text:root.virtual-output?"他アプリのマイク入力で CABLE Output を選択してください。":root.output-index==0?"同じ機器のASIO出力で最小遅延。":"Windows出力は同期補正を行うため、遅延が増えます。";font-size:11px;color:Theme.dim;}
+                HorizontalLayout{height:32px;spacing:10px;Action{label:"仮想出力を使う";active:root.virtual-output;enabled:!root.running&&!root.busy;clicked=>{root.select-virtual-output();}}Action{label:"仮想出力の設定";clicked=>{root.open-virtual-help();}}}
+                HorizontalLayout{height:30px;spacing:10px;CheckBox{text:"自分にはベースだけ返す";checked <=> root.monitor-enabled;enabled:!root.running&&!root.busy&&(root.output-index!=0||root.monitor-index!=0);toggled=>{root.audio-config-changed();}}}
+                HorizontalLayout{height:38px;spacing:10px;Text{text:"自分用の出力";width:90px;color:Theme.dim;vertical-alignment:center;}ComboBox{model:root.monitor-names;current-index <=> root.monitor-index;enabled:!root.running&&!root.busy;horizontal-stretch:1;selected(value)=>{root.audio-config-changed();}}}
+                if root.monitor-index!=0: Text{text:"別の出力機器には同期バッファ分の遅延が加わります。";font-size:11px;color:Theme.dim;}
+                if root.monitor-enabled && (root.output-index!=0||root.monitor-index!=0): HorizontalLayout{height:30px;spacing:10px;Text{text:"モニター音量";width:90px;color:Theme.dim;vertical-alignment:center;}Slider{minimum:-60;maximum:6;value:root.monitor-db;changed(value)=>{root.monitor-changed(value);}}Text{text:round(root.monitor-db)+" dB";width:50px;color:Theme.ink;}}
                 HorizontalLayout{height:20px;Text{text:"入力";color:Theme.dim;}Text{text:"サンプルレート";color:Theme.dim;}Text{text:"バッファ候補";color:Theme.dim;}}
                 HorizontalLayout{height:38px;spacing:12px;
                     ComboBox{model:root.channel-names;current-index <=> root.channel-index;enabled:!root.running&&!root.busy;selected(value)=>{root.audio-config-changed();}}

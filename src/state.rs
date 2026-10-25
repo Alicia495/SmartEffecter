@@ -203,7 +203,7 @@ pub struct Settings {
     pub schema: u32,
     pub tone: Tone,
     pub device: String,
-    /// Empty uses the input ASIO device; otherwise a WASAPI endpoint ID.
+    /// Empty uses ASIO; virtual:vb-cable resolves VB-CABLE; otherwise a WASAPI endpoint ID.
     pub output_device: String,
     pub sample_rate: u32,
     pub buffer: u32,
@@ -213,6 +213,10 @@ pub struct Settings {
     pub mic_channel: usize,
     pub instrument_db: f32,
     pub mic_db: f32,
+    pub monitor_enabled: bool,
+    /// Empty uses the instrument ASIO output; otherwise a WASAPI endpoint ID.
+    pub monitor_device: String,
+    pub monitor_db: f32,
     pub presets: Vec<Preset>,
     pub waveform: bool,
     pub dark: bool,
@@ -231,6 +235,9 @@ impl Default for Settings {
             mic_channel: 0,
             instrument_db: 0.,
             mic_db: -12.,
+            monitor_enabled: true,
+            monitor_device: String::new(),
+            monitor_db: -6.,
             presets: vec![],
             waveform: true,
             dark: true,
@@ -278,7 +285,11 @@ impl Settings {
         settings.buffer = settings.buffer.clamp(16, 8192);
         settings.input_channel = settings.input_channel.min(63);
         settings.mic_channel = settings.mic_channel.min(63);
-        for gain in [&mut settings.instrument_db, &mut settings.mic_db] {
+        for gain in [
+            &mut settings.instrument_db,
+            &mut settings.mic_db,
+            &mut settings.monitor_db,
+        ] {
             *gain = if gain.is_finite() {
                 gain.clamp(-60., 6.)
             } else {
@@ -312,6 +323,7 @@ pub struct SharedControls {
     values: [AtomicU32; 52],
     pub instrument_gain: AtomicU32,
     pub mic_gain: AtomicU32,
+    pub monitor_gain: AtomicU32,
     pub mute: AtomicU32,
     pub bypass: AtomicU32,
 }
@@ -322,6 +334,7 @@ impl SharedControls {
             values: std::array::from_fn(|_| AtomicU32::new(0)),
             instrument_gain: AtomicU32::new(1f32.to_bits()),
             mic_gain: AtomicU32::new(0.25118864f32.to_bits()),
+            monitor_gain: AtomicU32::new(0.5011872f32.to_bits()),
             mute: AtomicU32::new(0),
             bypass: AtomicU32::new(0),
         };
@@ -375,7 +388,15 @@ mod tests {
     #[test]
     fn older_settings_without_mixer_or_bass_still_load() {
         let mut json = serde_json::to_value(Settings::default()).unwrap();
-        for key in ["mic_device", "mic_channel", "mic_db", "instrument_db"] {
+        for key in [
+            "mic_device",
+            "mic_channel",
+            "mic_db",
+            "instrument_db",
+            "monitor_device",
+            "monitor_enabled",
+            "monitor_db",
+        ] {
             json.as_object_mut().unwrap().remove(key);
         }
         json["tone"].as_object_mut().unwrap().remove("bass");
@@ -383,6 +404,7 @@ mod tests {
         assert!(!settings.tone.bass);
         assert!(settings.mic_device.is_empty());
         assert_eq!(settings.instrument_db, 0.);
+        assert!(settings.monitor_device.is_empty());
     }
     #[test]
     fn corrupt_values_are_bounded() {

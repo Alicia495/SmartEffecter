@@ -20,6 +20,63 @@ impl LowPass {
         self.state
     }
 }
+// First-order antiderivative antialiasing: average the nonlinear transfer
+// over each sample interval, rather than folding its new harmonics directly.
+// f64 avoids cancellation in divided differences. State is fixed-size.
+#[derive(Default)]
+struct AntialiasedShaper {
+    previous: f64,
+}
+impl AntialiasedShaper {
+    fn run(&mut self, input: f32, mode: f32, amp: bool) -> f32 {
+        let x = input as f64;
+        let previous = self.previous;
+        self.previous = x;
+        let delta = x - previous;
+        let mode = mode as f64;
+        if delta.abs() < 1e-4 * (1. + x.abs().max(previous.abs())) {
+            transfer((x + previous) * 0.5, mode, amp) as f32
+        } else {
+            ((primitive(x, mode, amp) - primitive(previous, mode, amp)) / delta) as f32
+        }
+    }
+}
+fn log_cosh(x: f64) -> f64 {
+    let a = x.abs();
+    if a > 16. {
+        a - std::f64::consts::LN_2
+    } else {
+        a.cosh().ln()
+    }
+}
+fn transfer(x: f64, mode: f64, amp: bool) -> f64 {
+    let (a, b) = if amp {
+        (x / (1. + 0.15 * x.abs()), (2.2 * x).tanh() * 0.7)
+    } else {
+        (x.tanh(), (1.4 * x).clamp(-1., 1.))
+    };
+    a + (b - a) * mode
+}
+fn primitive(x: f64, mode: f64, amp: bool) -> f64 {
+    let (a, b) = if amp {
+        let z = 0.15 * x.abs();
+        (
+            (z - z.ln_1p()) / (0.15 * 0.15),
+            log_cosh(2.2 * x) * 0.7 / 2.2,
+        )
+    } else {
+        let z = (1.4 * x).abs();
+        (
+            log_cosh(x),
+            if z <= 1. {
+                0.5 * z * z / 1.4
+            } else {
+                (z - 0.5) / 1.4
+            },
+        )
+    };
+    a + (b - a) * mode
+}
 struct DelayLine {
     samples: Vec<f32>,
     head: usize,
@@ -79,7 +136,8 @@ pub struct Processor {
     gate_envelope: f32,
     gate_gain: f32,
     comp_envelope: f32,
-    drive_previous: f32,
+    drive_shaper: AntialiasedShaper,
+    amp_shaper: AntialiasedShaper,
     drive_filter: LowPass,
     bass_low: LowPass,
     amp_low: LowPass,
@@ -121,7 +179,8 @@ impl Processor {
             gate_envelope: 0.,
             gate_gain: 0.,
             comp_envelope: 0.,
-            drive_previous: 0.,
+            drive_shaper: AntialiasedShaper::default(),
+            amp_shaper: AntialiasedShaper::default(),
             drive_filter: LowPass::default(),
             bass_low: LowPass::default(),
             amp_low: LowPass::default(),
@@ -244,14 +303,14 @@ impl Processor {
             x * compression * db(self.current.effects[1].params[2]),
             self.wet[1],
         );
-        let shape = |v: f32| {
-            let drive = v * self.drive_gain;
-            mix(drive.tanh(), (drive * 1.4).clamp(-1., 1.), self.mode[2])
-        };
-        let driven = (shape((self.drive_previous + x) * 0.5) + shape(x)) * 0.5;
-        self.drive_previous = x;
-        let driven = self.drive_filter.run(driven, self.drive_tone) * self.drive_level;
         let bass_low = self.bass_low.run(x, pole(180., self.rate));
+        // Keep clean bass fundamentals out of the nonlinear branch so chord
+        // fundamentals do not modulate every upper harmonic.
+        let drive_input = if self.target.bass { x - bass_low } else { x };
+        let driven = self
+            .drive_shaper
+            .run(drive_input * self.drive_gain, self.mode[2], false);
+        let driven = self.drive_filter.run(driven, self.drive_tone) * self.drive_level;
         let driven = if self.target.bass {
             driven * 0.55 + bass_low * 0.8
         } else {
@@ -270,11 +329,7 @@ impl Processor {
             + (low_mid - low) * self.amp_eq[1]
             + (x - low_mid) * self.amp_eq[2];
         let pre = eq * self.amp_gain;
-        let amp = mix(
-            pre / (1. + 0.15 * pre.abs()),
-            (pre * 2.2).tanh() * 0.7,
-            self.mode[3],
-        );
+        let amp = self.amp_shaper.run(pre, self.mode[3], true);
         let amp = amp
             - self.amp_dc.run(
                 amp,
@@ -394,6 +449,70 @@ pub fn pitch(samples: &[f32], rate: f32) -> Option<(String, f32, f32)> {
 mod tests {
     use super::*;
     #[test]
+    fn nonlinear_integrals_match_transfer_and_stay_finite_at_near_dc() {
+        for amp in [false, true] {
+            for mode in [0., 0.5, 1.] {
+                for x in [-8., -1., -0.05, 0.05, 1., 8.] {
+                    let eps = 1e-5;
+                    let derivative = (primitive(x + eps, mode, amp)
+                        - primitive(x - eps, mode, amp))
+                        / (2. * eps);
+                    assert!((derivative - transfer(x, mode, amp)).abs() < 1e-5);
+                }
+                let mut shaper = AntialiasedShaper::default();
+                for i in 0..10000 {
+                    let x = 0.2 + (i as f32 * 0.000001).sin() * 0.000001;
+                    let y = shaper.run(x, mode as f32, amp);
+                    assert!(y.is_finite());
+                    if i > 0 {
+                        assert!((y - transfer(x as f64, mode, amp) as f32).abs() < 1e-4);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn distortion_alias_at_9000_hz_is_reduced_without_allocations() {
+        // 5th harmonic of 9 kHz folds to 3 kHz at 48 kHz.
+        for amp in [false, true] {
+            for mode in [0., 1.] {
+                let mut shaper = AntialiasedShaper::default();
+                let mut sums = [0f64; 4];
+                let allocations = crate::allocation_check::count(|| {
+                    for i in 0..48000 {
+                        let phase = std::f64::consts::TAU * 9000. * i as f64 / 48000.;
+                        let x = (2. * phase.sin()) as f32;
+                        let old = if amp {
+                            transfer(x as f64, mode, true)
+                        } else {
+                            let previous = (2.
+                                * (phase - std::f64::consts::TAU * 9000. / 48000.).sin())
+                                as f32;
+                            (transfer(((previous + x) * 0.5) as f64, mode, false)
+                                + transfer(x as f64, mode, false))
+                                * 0.5
+                        };
+                        let new = shaper.run(x, mode as f32, amp) as f64;
+                        if i >= 24000 {
+                            let alias = std::f64::consts::TAU * 3000. * i as f64 / 48000.;
+                            sums[0] += old * alias.sin();
+                            sums[1] += old * alias.cos();
+                            sums[2] += new * alias.sin();
+                            sums[3] += new * alias.cos();
+                        }
+                    }
+                });
+                assert_eq!(allocations, 0);
+                let old = sums[0] * sums[0] + sums[1] * sums[1];
+                let new = sums[2] * sums[2] + sums[3] * sums[3];
+                assert!(
+                    new < old * 0.5,
+                    "amp={amp} mode={mode}: alias power {old} -> {new}"
+                );
+            }
+        }
+    }
+    #[test]
     fn tuner_tracks_five_string_bass_at_both_rates() {
         for rate in [11025., 12000.] {
             for (hz, expected) in [
@@ -422,7 +541,13 @@ mod tests {
             tone.effects[0].enabled = false;
             tone.effects[1].enabled = false;
             let mut bass = Processor::new(48000., tone);
-            tone.bass = false;
+            // A bass drive now keeps clean lows instead of amplifying their
+            // distortion. Compare it to clean bass, not distorted guitar gain.
+            if drive {
+                tone.effects[2].enabled = false;
+            } else {
+                tone.bass = false;
+            }
             let mut guitar = Processor::new(48000., tone);
             let mut energy = [0f32; 2];
             let allocations = crate::allocation_check::count(|| {
@@ -438,7 +563,10 @@ mod tests {
                 }
             });
             assert_eq!(allocations, 0);
-            assert!(energy[0] > energy[1] * 1.5, "{energy:?}");
+            assert!(
+                energy[0] > energy[1] * if drive { 0.5 } else { 1.5 },
+                "{energy:?}"
+            );
         }
     }
     #[test]

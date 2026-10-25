@@ -18,6 +18,7 @@ struct AppState {
     controls: Arc<SharedControls>,
     devices: Vec<DeviceInfo>,
     outputs: Vec<audio::OutputDeviceInfo>,
+    monitor_outputs: Vec<audio::OutputDeviceInfo>,
     inputs: Vec<audio::OutputDeviceInfo>,
     feed: Option<Feed>,
     wave: VecDeque<WavePoint>,
@@ -95,6 +96,8 @@ fn refresh_effect(ui: &AppWindow, state: &mut AppState) {
     ui.set_bass_mode(state.settings.tone.bass);
     ui.set_instrument_db(state.settings.instrument_db);
     ui.set_mic_db(state.settings.mic_db);
+    ui.set_monitor_enabled(state.settings.monitor_enabled);
+    ui.set_monitor_db(state.settings.monitor_db);
 }
 fn refresh_presets(ui: &AppWindow, state: &AppState) {
     ui.set_preset_names(strings(
@@ -112,6 +115,10 @@ fn changed(ui: &AppWindow, state: &mut AppState) {
     );
     state.controls.mic_gain.store(
         10f32.powf(state.settings.mic_db / 20.).to_bits(),
+        Ordering::Relaxed,
+    );
+    state.controls.monitor_gain.store(
+        10f32.powf(state.settings.monitor_db / 20.).to_bits(),
         Ordering::Relaxed,
     );
     state.controls.publish(&state.settings.tone);
@@ -175,7 +182,51 @@ fn device_options(ui: &AppWindow, state: &AppState, index: usize) {
         ui.set_buffer_names(strings([]));
     }
 }
+fn refresh_monitor_outputs(
+    ui: &AppWindow,
+    state: &mut AppState,
+    outputs: &[audio::OutputDeviceInfo],
+) {
+    let mut monitors: Vec<_> = outputs
+        .iter()
+        .filter(|d| d.id != audio::VIRTUAL_OUTPUT)
+        .cloned()
+        .collect();
+    if !state.settings.monitor_device.is_empty()
+        && !monitors
+            .iter()
+            .any(|d| d.id == state.settings.monitor_device)
+    {
+        monitors.push(audio::OutputDeviceInfo {
+            id: state.settings.monitor_device.clone(),
+            name: "未接続のモニター（選び直してください）".into(),
+        });
+    }
+    ui.set_monitor_names(strings(
+        std::iter::once("入力機器 · ASIO（低遅延）".into())
+            .chain(monitors.iter().map(|d| d.name.clone())),
+    ));
+    ui.set_monitor_index(
+        monitors
+            .iter()
+            .position(|d| d.id == state.settings.monitor_device)
+            .map(|i| i + 1)
+            .unwrap_or(0) as i32,
+    );
+    state.monitor_outputs = monitors;
+}
 fn save_audio_selection(ui: &AppWindow, state: &mut AppState) {
+    state.settings.monitor_enabled = ui.get_monitor_enabled();
+    state.settings.monitor_device = if ui.get_monitor_index() == 0 {
+        String::new()
+    } else {
+        state
+            .monitor_outputs
+            .get((ui.get_monitor_index() - 1) as usize)
+            .map(|d| d.id.clone())
+            .unwrap_or_else(|| state.settings.monitor_device.clone())
+    };
+    state.last_edit = Some(Instant::now());
     state.settings.mic_device = match ui.get_mic_index() {
         0 => String::new(),
         1 => "asio".into(),
@@ -195,6 +246,7 @@ fn save_audio_selection(ui: &AppWindow, state: &mut AppState) {
             .map(|d| d.id.clone())
             .unwrap_or_else(|| state.settings.output_device.clone())
     };
+    ui.set_virtual_output(state.settings.output_device == audio::VIRTUAL_OUTPUT);
     if let Some(device) = state.devices.get(ui.get_device_index() as usize) {
         state.settings.device = device.name.clone();
         if let Some(rate) = device.rates.get(ui.get_rate_index() as usize) {
@@ -302,6 +354,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     ui.set_waveform_enabled(settings.waveform);
     ui.set_demo(demo);
     ui.set_output_names(strings(["同じ機器 · ASIO（低遅延）".into()]));
+    ui.set_monitor_names(strings(["入力機器 · ASIO（低遅延）".into()]));
     if args.iter().any(|a| a == "--compact") {
         ui.window().set_size(slint::LogicalSize::new(900., 740.));
     }
@@ -323,6 +376,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         controls: controls.clone(),
         devices: vec![],
         outputs: vec![],
+        monitor_outputs: vec![],
         inputs: vec![],
         feed: None,
         wave: VecDeque::with_capacity(400),
@@ -451,6 +505,17 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ui.set_input_db(value);
         changed(ui, s);
     });
+    bind!(
+        on_monitor_changed,
+        |ui: &AppWindow, s: &mut AppState, value: f32| {
+            if !value.is_finite() {
+                return;
+            }
+            s.settings.monitor_db = value.clamp(-60., 6.);
+            ui.set_monitor_db(s.settings.monitor_db);
+            changed(ui, s);
+        }
+    );
     bind!(on_bass_changed, |ui: &AppWindow,
                             s: &mut AppState,
                             bass: bool| {
@@ -645,6 +710,27 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_select_virtual_output(move || {
+            if let Some(ui) = weak.upgrade() {
+                if ui.get_running() || ui.get_busy() {
+                    return;
+                }
+                let mut s = state.borrow_mut();
+                if let Some(index) = s.outputs.iter().position(|d| d.id == audio::VIRTUAL_OUTPUT) {
+                    ui.set_output_index((index + 1) as i32);
+                    save_audio_selection(&ui, &mut s);
+                }
+            }
+        });
+    }
+    ui.on_open_virtual_help(|| {
+        let _ = std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", audio::VIRTUAL_OUTPUT_HELP])
+            .spawn();
+    });
+    {
+        let weak = ui.as_weak();
         let commands = commands.clone();
         ui.on_rescan(move || {
             if let Some(ui) = weak.upgrade() {
@@ -696,11 +782,13 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     ui.set_output_names(strings(std::iter::once("同じ機器 · ASIO（低遅延）".to_owned()).chain(outputs.iter().map(|d|d.name.clone()))));
                     ui.set_output_index(outputs.iter().position(|d|d.id==s.settings.output_device).map(|i|i+1).unwrap_or(0) as i32);
+                    ui.set_virtual_output(s.settings.output_device == audio::VIRTUAL_OUTPUT);
+                    refresh_monitor_outputs(&ui, &mut s, &outputs);
                     s.outputs=outputs;
                 },
                 Err(error)=>ui.set_message(format!("Windows出力を列挙できません: {error}").into())
             }}
-            Event::Started(result)=>{ui.set_busy(false);match result{Ok((feed,info))=>{s.feed=Some(feed);s.wave.clear();s.tuner.clear();s.last_blocks=0;s.last_audio=Instant::now();ui.set_running(true);ui.set_status(if s.settings.output_device.is_empty(){"ASIO 接続中"}else{"Windows出力 接続中"}.into());ui.set_device_label(info.into());ui.set_settings_open(false);if live_seconds.is_some(){live_start=Some(Instant::now());}},Err(e)=>{ui.set_running(false);ui.set_status("開始できません".into());ui.set_message(e.into());ui.set_settings_open(true);}}}
+            Event::Started(result)=>{ui.set_busy(false);match result{Ok((feed,info))=>{s.feed=Some(feed);s.wave.clear();s.tuner.clear();s.last_blocks=0;s.last_audio=Instant::now();ui.set_running(true);ui.set_status(if s.settings.output_device.is_empty(){"ASIO 接続中"}else if s.settings.output_device == audio::VIRTUAL_OUTPUT {"仮想出力 接続中"}else{"Windows出力 接続中"}.into());ui.set_device_label(info.into());ui.set_settings_open(false);if live_seconds.is_some(){live_start=Some(Instant::now());}},Err(e)=>{ui.set_running(false);ui.set_status("開始できません".into());ui.set_message(e.into());ui.set_settings_open(true);}}}
             Event::Stopped=>{s.feed=None;s.wave.clear();s.tuner.clear();ui.set_running(false);ui.set_busy(false);ui.set_status("停止中".into());ui.set_latency("—".into());ui.set_input_level(0.);ui.set_output_level(0.);}
         }}
         if live_seconds.is_some()&&live_start.is_none()&&!ui.get_busy()&&!s.devices.is_empty(){let device=s.devices[ui.get_device_index() as usize].clone();s.settings.device=device.name;s.settings.buffer=live_buffer;ui.set_busy(true);let _=timer_commands.send(Command::Start(Box::new(s.settings.clone())));}
@@ -711,9 +799,16 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let m=&feed.metrics;let input=f32::from_bits(m.input_peak.swap(0,Ordering::Relaxed));let output=f32::from_bits(m.output_peak.swap(0,Ordering::Relaxed));
             ui.set_input_level(input.max(ui.get_input_level()*0.85));ui.set_output_level(output.max(ui.get_output_level()*0.85));
             if input>=0.999||output>=1.{s.last_clip=Instant::now();ui.set_input_clip(input>=0.999);ui.set_output_clip(output>=1.);}else if s.last_clip.elapsed()>Duration::from_secs(1){ui.set_input_clip(false);ui.set_output_clip(false);}
-            let report=m.report();ui.set_latency(format!("{:.2} ms",report.estimated_round_trip_ms).into());ui.set_diagnostics(format!("実バッファ {} samples · 処理最大 {} µs\n入出力欠落 {} / {} frames · 期限超過 {} · エラー {}\nマイク: 待ち {:.1} ms · 欠落 {} / {} frames · エラー {}",report.callback_frames,report.max_process_us,report.missing_frames,report.overflow_frames,report.deadline_misses,report.errors,report.mic_queue_ms,report.mic_missing_frames,report.mic_overflow_frames,report.mic_errors).into());
+            let report=m.report();ui.set_latency(format!("{:.2} ms",report.estimated_round_trip_ms).into());ui.set_diagnostics(format!("実バッファ {} samples · 処理最大 {} µs\n入出力欠落 {} / {} frames · 期限超過 {} · エラー {}\nマイク: 待ち {:.1} ms · 欠落 {} / {} frames · 一時欠落 {} · エラー {}",report.callback_frames,report.max_process_us,report.missing_frames,report.overflow_frames,report.deadline_misses,report.errors,report.mic_queue_ms,report.mic_missing_frames,report.mic_overflow_frames,report.mic_discontinuities,report.mic_errors).into());
+            if let Some(monitor) = &feed.monitor_metrics {
+                let monitor = monitor.report();
+                ui.set_diagnostics(format!("{}\nベースモニター: 推定 {:.2} ms · 欠落 {} / {} frames · エラー {}",ui.get_diagnostics(),report.driver_input_ms + monitor.driver_output_ms + monitor.callback_queue_ms,monitor.missing_frames,monitor.overflow_frames,monitor.errors).into());
+                if monitor.errors > 0 && !ui.get_busy() {
+                    ui.set_message("ベースモニター出力でエラーが発生しました。接続を確認して再接続してください。".into());
+                }
+            }
             if report.mic_errors > 0 && !ui.get_busy() {
-                ui.set_message("マイク入力でエラーが発生しました。楽器出力は継続中です。マイクの接続を確認し再接続してください。".into());
+                ui.set_message(format!("{}。楽器出力は継続中です。停止して再接続してください。",report.mic_error.unwrap_or("マイク入力エラー")).into());
             }
             if report.input_blocks!=s.last_blocks{s.last_blocks=report.input_blocks;s.last_audio=Instant::now();}
             if (report.errors>0||s.last_audio.elapsed()>Duration::from_secs(2))&&!ui.get_busy(){ui.set_message("音声接続が停止しました。接続を確認して、再接続してください。".into());ui.set_busy(true);let _=timer_commands.send(Command::Stop);}
@@ -743,6 +838,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             std::iter::once("同じ機器 · ASIO（低遅延）".to_owned())
                 .chain(outputs.iter().map(|d| d.name.clone())),
         ));
+        refresh_monitor_outputs(&ui, &mut state.borrow_mut(), &outputs);
         state.borrow_mut().outputs = outputs;
         let weak = ui.as_weak();
         smoke_timer.start(slint::TimerMode::SingleShot,Duration::from_millis(1500),move||{
@@ -782,10 +878,17 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ui.invoke_preset_action(0,"UI smoke tone".into());assert_eq!(Settings::load().unwrap().output_device,"windows:default");assert_eq!(Settings::load().unwrap().mic_device,"asio");assert_eq!(Settings::load().unwrap().mic_db,-18.);assert!(Settings::load().unwrap().presets.iter().any(|p|p.name=="UI smoke tone"));
         ui.invoke_preset_action(2,"Renamed smoke tone".into());assert!(Settings::load().unwrap().presets.iter().any(|p|p.name=="Renamed smoke tone"));
         ui.invoke_preset_action(3,"".into());assert!(!Settings::load().unwrap().presets.iter().any(|p|p.name=="Renamed smoke tone"));
+        ui.invoke_select_virtual_output();assert!(ui.get_virtual_output());
+        ui.set_monitor_enabled(true);ui.set_monitor_index(1);ui.invoke_audio_config_changed();ui.invoke_monitor_changed(-9.);
+
+        ui.invoke_preset_action(0,"Virtual route smoke".into());
+        assert_eq!(Settings::load().unwrap().output_device,audio::VIRTUAL_OUTPUT);
+        assert_eq!(Settings::load().unwrap().monitor_device,"windows:default");assert!(Settings::load().unwrap().monitor_enabled);assert_eq!(Settings::load().unwrap().monitor_db,-9.);
+        ui.invoke_preset_action(3,"".into());
         ui.set_message("".into());ui.set_settings_open(false);ui.set_dark(true);save_png("artifacts/ui-smoke-dark.png",&ui.window().take_snapshot().unwrap()).unwrap();
         ui.set_dark(false);ui.set_settings_open(true);save_png("artifacts/ui-smoke-settings-light.png",&ui.window().take_snapshot().unwrap()).unwrap();
         ui.set_settings_open(false);ui.set_tuner_open(true);save_png("artifacts/ui-smoke-tuner.png",&ui.window().take_snapshot().unwrap()).unwrap();
-        std::fs::write("artifacts/ui-smoke.json",r#"{"passed":true,"checks":["pointer effect selection","pointer independent bypass","parameter edit","numeric edit","pointer mute","knob drag","knob keyboard","collapsed amp level mapping","EQ expansion","Windows output selection persists","factory preset","bass preset","mixer gain and microphone selection persistence","save and reload","rename and reload","delete and reload","dark light and tuner snapshots"]}"#).unwrap();
+        std::fs::write("artifacts/ui-smoke.json",r#"{"passed":true,"checks":["pointer effect selection","pointer independent bypass","parameter edit","numeric edit","pointer mute","knob drag","knob keyboard","collapsed amp level mapping","EQ expansion","Windows output selection persists","virtual output selection persists","bass monitor settings persist","factory preset","bass preset","mixer gain and microphone selection persistence","save and reload","rename and reload","delete and reload","dark light and tuner snapshots"]}"#).unwrap();
         let _=slint::quit_event_loop();
     });
     }
