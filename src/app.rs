@@ -350,6 +350,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let controls = Arc::new(SharedControls::new(&settings.tone));
     let (commands, events, worker) = audio::spawn_worker(controls.clone());
     let ui = AppWindow::new()?;
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_dark(settings.dark);
     ui.set_waveform_enabled(settings.waveform);
     ui.set_demo(demo);

@@ -1,6 +1,9 @@
 [package]
 name = "guitar-smart-effecter"
-version = "0.1.0"
+version = "1.0.0"
+license = "GPL-3.0-only"
+repository = "https://github.com/Alicia495/SmartEffecter"
+description = "Guitar and bass effects with microphone mixing and virtual output for Windows"
 edition = "2024"
 rust-version = "1.92"
 build = "build.rs"

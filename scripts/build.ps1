@@ -23,6 +23,10 @@ try {
         throw
     }
     Copy-Item README.md dist\README.md
+    Copy-Item LICENSE dist\LICENSE
+    Copy-Item CHANGELOG.md dist\CHANGELOG.md
+    New-Item -ItemType Directory -Force dist\docs | Out-Null
+    Copy-Item docs\* dist\docs -Recurse -Force
     if (Test-Path TEST_REPORT.md) { Copy-Item TEST_REPORT.md dist\TEST_REPORT.md }
     python scripts\package-notices.py
     if ($LASTEXITCODE -ne 0) { throw 'Packaging notices failed' }

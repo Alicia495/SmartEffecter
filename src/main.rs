@@ -38,6 +38,12 @@ fn report(
 }
 fn entry() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version") {
+        return report(
+            &args,
+            &serde_json::json!({"name":"SmartEffecter","version":env!("CARGO_PKG_VERSION"),"target":"windows-x64"}),
+        );
+    }
     if args.iter().any(|a| a == "--devices") {
         return report(&args, &audio::devices().map_err(std::io::Error::other)?);
     }
