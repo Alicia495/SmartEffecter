@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tarfile
 import tomllib
+import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,9 +33,7 @@ def main():
     tag = "v" + version.removesuffix(".0")
     output = ROOT / "artifacts" / "releases" / tag
     output.mkdir(parents=True, exist_ok=True)
-    stage = output / "stage"
-    if stage.exists():
-        raise SystemExit(f"Staging directory already exists: {stage}")
+    stage = output / ("stage-" + uuid.uuid4().hex[:8])
     app = stage / f"SmartEffecter-{tag}"
     app.mkdir(parents=True)
     for name in ["GuitarSmartEffecter.exe", "README.md", "LICENSE", "CHANGELOG.md", "TEST_REPORT.md", "THIRD_PARTY_NOTICES.md"]:
@@ -56,15 +55,16 @@ def main():
             shutil.copy2(ROOT / name, destination)
     metadata = json.loads(run("cargo", "metadata", "--locked", "--offline", "--format-version", "1"))
     dependencies = [p for p in metadata["packages"] if p["source"]]
+    locked = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
+    package_checksums = {(p["name"], p["version"]): p["checksum"] for p in locked["package"] if "checksum" in p}
     for package in dependencies:
         origin = Path(package["manifest_path"]).parent
         destination = source / "vendor" / f"{package['name']}-{package['version']}"
         shutil.copytree(origin, destination)
         checksum = destination / ".cargo-checksum.json"
-        original = json.loads(checksum.read_text(encoding="utf-8"))
         files = {p.relative_to(destination).as_posix(): digest(p)
                  for p in sorted(destination.rglob("*")) if p.is_file() and p != checksum}
-        checksum.write_text(json.dumps({"files": files, "package": original["package"]}), encoding="utf-8")
+        checksum.write_text(json.dumps({"files": files, "package": package_checksums[(package["name"], package["version"]) ]}), encoding="utf-8")
     sdk = Path(os.environ.get("CPAL_ASIO_DIR", ROOT / ".tools/asio-sdk/ASIOSDK"))
     sdk_destination = source / "third_party" / "ASIOSDK"
     sdk_destination.mkdir(parents=True)
