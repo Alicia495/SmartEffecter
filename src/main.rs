@@ -2,6 +2,7 @@
 mod app;
 mod audio;
 mod dsp;
+mod scope;
 mod state;
 slint::include_modules!();
 

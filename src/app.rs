@@ -101,10 +101,14 @@ fn refresh_effect(ui: &AppWindow, state: &mut AppState) {
 }
 fn refresh_presets(ui: &AppWindow, state: &AppState) {
     ui.set_preset_names(strings(
-        ["現在の音色", "Clean", "Crunch", "Lead"]
-            .map(str::to_owned)
-            .into_iter()
-            .chain(state.settings.presets.iter().map(|p| p.name.clone())),
+        if state.settings.tone.bass {
+            ["現在の音色", "Bass Clean", "Bass Drive", "Bass Slap"]
+        } else {
+            ["現在の音色", "Clean", "Crunch", "Lead"]
+        }
+        .map(str::to_owned)
+        .into_iter()
+        .chain(state.settings.presets.iter().map(|p| p.name.clone())),
     ));
     ui.set_user_preset(ui.get_preset_index() >= 4);
 }
@@ -259,54 +263,21 @@ fn save_audio_selection(ui: &AppWindow, state: &mut AppState) {
         state.last_edit = Some(Instant::now());
     }
 }
-fn append_wave(history: &mut VecDeque<WavePoint>, point: WavePoint) {
-    if history
-        .back()
-        .is_some_and(|last| point.sequence != last.sequence + u64::from(point.frames))
-    {
-        // A dropped visual update is a gap, not adjacent audio. Start a fresh
-        // window rather than compressing the missing time into the waveform.
-        history.clear();
-    }
-    if history.len() >= 400 {
-        history.pop_front();
-    }
-    history.push_back(point);
-}
-fn waveform(history: &VecDeque<WavePoint>, input: bool, dark: bool) -> slint::Image {
-    let width = 1000usize;
-    let height = 100usize;
-    let mut buffer = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(width as u32, height as u32);
-    let bg = if dark { [20, 25, 28] } else { [238, 241, 242] };
-    let line = if dark { [139, 224, 189] } else { [38, 118, 88] };
-    let center = if dark { [53, 65, 72] } else { [203, 213, 217] };
-    let bytes = buffer.make_mut_bytes();
-    for px in bytes.as_chunks_mut::<3>().0 {
-        px.copy_from_slice(&bg);
-    }
-    for x in 0..width {
-        let base = (height / 2 * width + x) * 3;
-        bytes[base..base + 3].copy_from_slice(&center);
-    }
-    let offset = 400 - history.len();
-    for (i, point) in history.iter().enumerate() {
-        let (lo, hi) = if input {
-            (point.low_in, point.high_in)
+
+fn scope_image(ui: &AppWindow, state: &AppState) -> slint::Image {
+    let theme = ui.global::<crate::Theme>();
+    crate::scope::image(
+        &state.wave,
+        ui.get_wave_input(),
+        if ui.get_demo() {
+            48000
         } else {
-            (point.low_out, point.high_out)
-        };
-        let x = (offset + i) * width / 400;
-        let next = ((offset + i + 1) * width / 400).min(width);
-        let top = ((0.5 - hi.clamp(-1., 1.) * 0.46) * height as f32) as usize;
-        let bottom = ((0.5 - lo.clamp(-1., 1.) * 0.46) * height as f32) as usize;
-        for x in x..next.saturating_sub(1).max(x + 1) {
-            for y in top.min(height - 1)..=bottom.min(height - 1) {
-                let p = (y * width + x) * 3;
-                bytes[p..p + 3].copy_from_slice(&line);
-            }
-        }
-    }
-    slint::Image::from_rgb8(buffer)
+            state.settings.sample_rate
+        },
+        ui.get_scope_ms() as u32,
+        theme.get_accent(),
+        theme.get_scope_grid(),
+    )
 }
 
 pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -380,7 +351,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         monitor_outputs: vec![],
         inputs: vec![],
         feed: None,
-        wave: VecDeque::with_capacity(400),
+        wave: VecDeque::with_capacity(4096),
         tuner: VecDeque::with_capacity(2048),
         parameters: Rc::new(VecModel::default()),
         last_edit: None,
@@ -401,7 +372,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "同じASIO機器の別入力".into(),
     ]));
     refresh_presets(&ui, &state.borrow());
-    ui.set_waveform(waveform(&state.borrow().wave, false, ui.get_dark()));
+    ui.set_waveform(scope_image(&ui, &state.borrow()));
     if let Some(error) = load_error {
         ui.set_message(format!("設定を読み込めませんでした: {error}").into());
     }
@@ -520,7 +491,10 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     bind!(on_bass_changed, |ui: &AppWindow,
                             s: &mut AppState,
                             bass: bool| {
-        s.settings.tone.bass = bass;
+        s.settings.switch_instrument(bass);
+        ui.set_preset_index(0);
+        refresh_presets(ui, s);
+        refresh_effect(ui, s);
         changed(ui, s);
     });
     bind!(on_bass_preset, |ui: &AppWindow,
@@ -583,7 +557,17 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                                s: &mut AppState,
                                i: i32| {
         if (1..=3).contains(&i) {
-            s.settings.tone = Tone::factory((i - 1) as usize);
+            s.settings.tone = if s.settings.tone.bass {
+                let mut tone = Tone::bass_factory(i == 2);
+                if i == 3 {
+                    tone.effects[3].params[1] = 3.;
+                    tone.effects[3].params[2] = -3.;
+                    tone.effects[3].params[3] = 4.;
+                }
+                tone
+            } else {
+                Tone::factory((i - 1) as usize)
+            };
         } else if i >= 4
             && let Some(preset) = s.settings.presets.get((i - 4) as usize)
         {
@@ -795,7 +779,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         if live_seconds.is_some()&&live_start.is_none()&&!ui.get_busy()&&!s.devices.is_empty(){let device=s.devices[ui.get_device_index() as usize].clone();s.settings.device=device.name;s.settings.buffer=live_buffer;ui.set_busy(true);let _=timer_commands.send(Command::Start(Box::new(s.settings.clone())));}
         timer_controls.mute.store(u32::from(ui.get_busy()||ui.get_muted()||(ui.get_tuner_open()&&ui.get_tuner_muted())),Ordering::Relaxed);timer_controls.bypass.store(u32::from(ui.get_bypassed()),Ordering::Relaxed);
         if let Some(mut feed)=s.feed.take(){
-            while let Ok(point)=feed.wave.pop(){append_wave(&mut s.wave,point);}
+            while let Ok(point)=feed.wave.pop(){crate::scope::append(&mut s.wave,point);}
             while let Ok(sample)=feed.tuner.pop(){if s.tuner.len()>=2048{s.tuner.pop_front();}s.tuner.push_back(sample);}
             let m=&feed.metrics;let input=f32::from_bits(m.input_peak.swap(0,Ordering::Relaxed));let output=f32::from_bits(m.output_peak.swap(0,Ordering::Relaxed));
             ui.set_input_level(input.max(ui.get_input_level()*0.85));ui.set_output_level(output.max(ui.get_output_level()*0.85));
@@ -803,9 +787,9 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let report=m.report();ui.set_latency(format!("{:.2} ms",report.estimated_round_trip_ms).into());ui.set_diagnostics(format!("実バッファ {} samples · 処理最大 {} µs\n入出力欠落 {} / {} frames · 期限超過 {} · エラー {}\nマイク: 待ち {:.1} ms · 欠落 {} / {} frames · 一時欠落 {} · エラー {}",report.callback_frames,report.max_process_us,report.missing_frames,report.overflow_frames,report.deadline_misses,report.errors,report.mic_queue_ms,report.mic_missing_frames,report.mic_overflow_frames,report.mic_discontinuities,report.mic_errors).into());
             if let Some(monitor) = &feed.monitor_metrics {
                 let monitor = monitor.report();
-                ui.set_diagnostics(format!("{}\nベースモニター: 推定 {:.2} ms · 欠落 {} / {} frames · エラー {}",ui.get_diagnostics(),report.driver_input_ms + monitor.driver_output_ms + monitor.callback_queue_ms,monitor.missing_frames,monitor.overflow_frames,monitor.errors).into());
+                ui.set_diagnostics(format!("{}\n楽器モニター: 推定 {:.2} ms · 欠落 {} / {} frames · エラー {}",ui.get_diagnostics(),report.driver_input_ms + monitor.driver_output_ms + monitor.callback_queue_ms,monitor.missing_frames,monitor.overflow_frames,monitor.errors).into());
                 if monitor.errors > 0 && !ui.get_busy() {
-                    ui.set_message("ベースモニター出力でエラーが発生しました。接続を確認して再接続してください。".into());
+                    ui.set_message("楽器モニター出力でエラーが発生しました。接続を確認して再接続してください。".into());
                 }
             }
             if report.mic_errors > 0 && !ui.get_busy() {
@@ -827,9 +811,16 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         if demo {
             let tone=s.settings.tone;let mut processor=s.demo_processor.take().unwrap();processor.set_tone(tone);
-            for _ in 0..7{let mut point=WavePoint::default();for _ in 0..240{let n=s.demo_sample;let t=n as f32/48000.;let envelope=(-(t%0.62)*6.).exp();let input=((std::f32::consts::TAU*110.*t).sin()+0.3*(std::f32::consts::TAU*220.*t).sin())*0.22*envelope;let(input,out)=processor.process(input,ui.get_bypassed(),ui.get_muted());point.low_in=point.low_in.min(input);point.high_in=point.high_in.max(input);point.low_out=point.low_out.min(out[0]).min(out[1]);point.high_out=point.high_out.max(out[0]).max(out[1]);s.demo_sample+=1;}point.sequence=s.demo_sample;point.frames=240;append_wave(&mut s.wave,point);}s.demo_processor=Some(processor);
+            for _ in 0..1680 {
+                let t=s.demo_sample as f32/48000.;
+                let input=((std::f32::consts::TAU*110.*t).sin()+0.3*(std::f32::consts::TAU*220.*t).sin())*0.5;
+                let(input,out)=processor.process(input,ui.get_bypassed(),ui.get_muted());
+                s.demo_sample+=1;
+                let sequence=s.demo_sample; if sequence.is_multiple_of(4) { crate::scope::append(&mut s.wave,WavePoint {low_in:input,high_in:input,low_out:(out[0]+out[1])*0.5,high_out:(out[0]+out[1])*0.5,sequence,frames:4}); }
+            }
+            s.demo_processor=Some(processor);
         }
-        if ui.get_waveform_enabled()&&!ui.window().is_minimized(){ui.set_waveform(waveform(&s.wave,ui.get_wave_input(),ui.get_dark()));}
+        if ui.get_waveform_enabled()&&!ui.window().is_minimized(){ui.set_waveform(scope_image(&ui, &s));}
         if !demo&&live_seconds.is_none()&&s.last_edit.is_some_and(|time|time.elapsed()>Duration::from_millis(800)){if let Err(e)=s.settings.save(){ui.set_message(format!("設定の保存に失敗: {e}").into());}s.last_edit=None;}
     });
     let smoke_timer = slint::Timer::default();

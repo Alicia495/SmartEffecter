@@ -1,15 +1,44 @@
 import { ScrollView, ComboBox, Slider, LineEdit, CheckBox, Palette, AboutSlint } from "std-widgets.slint";
 export struct EffectRow { name: string, enabled: bool }
 export struct ParameterRow { index: int, name: string, value: float, minimum: float, maximum: float, step: float, default-value: float, display: string }
-global Theme {
+export global Theme {
     in-out property <bool> dark: true;
-    out property <color> bg: dark ? #14191c : #eef1f2;
-    out property <color> panel: dark ? #1c2327 : #ffffff;
-    out property <color> elevated: dark ? #252f35 : #e3e9eb;
-    out property <color> edge: dark ? #354148 : #cbd5d9;
-    out property <color> ink: dark ? #e9efed : #1b302d;
-    out property <color> dim: dark ? #95a8ad : #59716f;
-    out property <color> accent: dark ? #8be0bd : #267658;
+    out property <color> bg: dark ? #09090b : #edeef2;
+    out property <color> panel: dark ? #161518 : #faf9fc;
+    out property <color> elevated: dark ? #28252b : #e9e3eb;
+    out property <color> edge: dark ? #ffffff22 : #3d183328;
+    out property <color> ink: dark ? #f4eff4 : #261d27;
+    out property <color> dim: dark ? #b5aab4 : #6d5a69;
+    out property <color> accent: dark ? #ff87bf : #ba286e;
+    out property <color> accent-deep: dark ? #c21b70 : #f5bad5;
+    out property <color> accent-ink: dark ? #240c18 : #ffffff;
+    out property <color> glow: dark ? #7f244c : #e7c6d7;
+    out property <color> sheen: dark ? #ffffff12 : #ffffffcc;
+    out property <color> track: dark ? #3b3038 : #d9cbd4;
+    out property <color> scope-grid: dark ? #b58ca52c : #85657838;
+    out property <color> overlay: dark ? #00000099 : #34202e66;
+    out property <color> warning: dark ? #ffa081 : #b63c22;
+    out property <color> clear: #00000000;
+}
+component Glass inherits Rectangle {
+    border-radius: 30px; border-width: 1px; border-color: Theme.edge;
+    background: @linear-gradient(135deg, Theme.elevated, Theme.panel 55%, Theme.panel);
+    Rectangle { x: 2px; y: 1px; width: parent.width - 4px; height: 1px; border-radius: 1px; background: Theme.sheen; }
+    @children
+}
+component Ring inherits Path {
+    in property <float> fraction: 1;
+    width: 112px; height: 112px;
+    viewbox-width: 112; viewbox-height: 112;
+    stroke: Theme.accent; stroke-width: 6px;
+    fill: Theme.clear;
+    MoveTo { x: 20.64; y: 91.36; }
+    ArcTo {
+        radius-x: 50; radius-y: 50;
+        x: 56 + 50*cos((135 + 270*max(0.0001,root.fraction))*1deg);
+        y: 56 + 50*sin((135 + 270*max(0.0001,root.fraction))*1deg);
+        large-arc: root.fraction > 0.66667; sweep: true;
+    }
 }
 component Action inherits Rectangle {
     in property <string> label;
@@ -18,15 +47,15 @@ component Action inherits Rectangle {
     in property <bool> primary;
     callback clicked;
     min-width: 40px; min-height: 38px;
-    border-radius: 9px;
-    background: primary ? Theme.accent : active ? Theme.elevated : area.has-hover ? Theme.elevated : transparent;
+    border-radius: 22px;
+    background: primary ? Theme.accent : active ? Theme.elevated : area.has-hover ? Theme.elevated : Theme.clear;
     border-width: primary ? 0px : 1px;
     border-color: active || keyboard.has-focus ? Theme.accent : Theme.edge;
     opacity: enabled ? 1 : 0.4;
     forward-focus: keyboard;
     accessible-role: button; accessible-label: label; accessible-enabled: enabled;
     accessible-action-default => {if root.enabled {root.clicked();}}
-    Text { text: root.label; color: root.primary ? (Theme.dark ? #14291f : #ffffff) : Theme.ink; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+    Text { text: root.label; color: root.primary ? Theme.accent-ink : Theme.ink; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
     area := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => {root.clicked();} }
     keyboard := FocusScope {
         width: 0px; enabled: root.enabled;
@@ -48,9 +77,9 @@ component Dial inherits Rectangle {
         alignment: center; spacing: 13px;
         Text {text: root.parameter.name; color: Theme.ink; font-size: 13px; horizontal-alignment: center; height: 20px;}
         knob := Rectangle {
-            width: root.compact ? 80px : 104px; height: self.width;
-            border-radius: self.width/2; border-width: 3px; border-color: keys.has-focus ? Theme.accent : Theme.edge;
-            background: Theme.bg;
+            width: root.compact ? 92px : 116px; height: self.width;
+            border-radius: self.width/2; border-width: 1px; border-color: keys.has-focus ? Theme.accent : Theme.clear;
+            background: Theme.clear;
             forward-focus: keys;
             accessible-role: slider; accessible-label: root.parameter.name;
             accessible-value: root.parameter.value;
@@ -59,12 +88,13 @@ component Dial inherits Rectangle {
             accessible-value-step: root.parameter.step;
             accessible-action-increment => {root.edited(root.parameter.value + root.parameter.step);}
             accessible-action-decrement => {root.edited(root.parameter.value - root.parameter.step);}
+            Ring {width: parent.width; height: parent.height; stroke: Theme.track;}
+            Ring {width: parent.width; height: parent.height; fraction: clamp((root.parameter.value - root.parameter.minimum)/(root.parameter.maximum - root.parameter.minimum),0,1); visible: self.fraction > 0;}
             Rectangle {
-                x: 7px; y: 7px; width: parent.width - 14px; height: parent.height - 14px;
+                x: 12px; y: 12px; width: parent.width - 24px; height: parent.height - 24px;
                 border-radius: self.width/2; border-width: 1px; border-color: Theme.edge;
-                background: Theme.panel;
-                transform-rotation: (-135 + 270*(root.parameter.value - root.parameter.minimum)/(root.parameter.maximum - root.parameter.minimum))*1deg;
-                Rectangle { x: (parent.width - 3px)/2; y: 8px; width: 3px; height: 19px; border-radius: 2px; background: Theme.accent; }
+                background: @linear-gradient(145deg, Theme.elevated, Theme.panel);
+                Text {text: root.parameter.display; color: Theme.ink; font-size: root.compact ? 15px : 19px; horizontal-alignment:center;vertical-alignment:center;}
             }
             drag := TouchArea {
                 property <length> origin-y;
@@ -94,12 +124,14 @@ component Dial inherits Rectangle {
     }
 }
 export component AppWindow inherits Window {
-    title: "Guitar Smart Effecter";
-    preferred-width: 1120px; preferred-height: 780px;
-    min-width: 900px; min-height: 740px;
+    title: "SmartEffecter";
+    preferred-width: 1180px; preferred-height: 820px;
+    min-width: 960px; min-height: 760px;
     background: Theme.bg;
     default-font-family: "Yu Gothic UI";
     default-font-size: 14px;
+    in-out property <int> page: 0;
+    in-out property <int> scope-ms: 40;
     in-out property <bool> dark: true;
     in-out property <bool> waveform-enabled: true;
     in-out property <bool> wave-input: false;
@@ -190,79 +222,109 @@ export component AppWindow inherits Window {
     callback open-driver-help;
     init => {Palette.color-scheme=root.dark?ColorScheme.dark:ColorScheme.light;}
     changed dark => {Theme.dark=root.dark;Palette.color-scheme=root.dark?ColorScheme.dark:ColorScheme.light;}
-    VerticalLayout {
-        padding: 24px; spacing: 16px;
-        HorizontalLayout {
-            height: 48px; spacing: 12px;
-            Rectangle {width:36px; HorizontalLayout {padding-top:10px;padding-bottom:10px;spacing:4px;Rectangle{width:3px;background:Theme.accent;border-radius:2px;}Rectangle{width:3px;background:Theme.accent;border-radius:2px;}Rectangle{width:3px;background:Theme.accent;border-radius:2px;}}}
-            VerticalLayout {spacing: 0px;width: 145px;Text{text:"GUITAR";font-size:20px;font-weight:600;color:Theme.ink;}Text{text:"SMART EFFECTER";font-size:10px;letter-spacing:1.5px;color:Theme.dim;}}
-            Rectangle {horizontal-stretch: 1;}
-            ComboBox {width: 190px;model: root.preset-names;current-index <=> root.preset-index;selected(value)=>{root.preset-selected(self.current-index);}}
-            Text {text: root.dirty ? "•" : "";width:8px;color:Theme.accent;vertical-alignment:center;}
-            Action {label:"保存";width:56px;clicked=>{root.presets-open=true;}}
-            Action {label:"BYPASS";width:78px;active:root.bypassed;clicked=>{root.bypassed=!root.bypassed;}}
-            Action {label:root.muted?"MUTE ●":"MUTE";width:72px;active:root.muted;clicked=>{root.muted=!root.muted;}}
-            Action {label:"設定";width:56px;clicked=>{root.settings-open=true;}}
-        }
-        Rectangle {height:1px;background:Theme.edge;}
-        if root.waveform-enabled: VerticalLayout {
-            height: 146px;spacing:5px;
-            HorizontalLayout {
-                height:32px;spacing:6px;
-                Text{text:root.demo?"DEMO · 音声出力なし":root.device-label;color:Theme.dim;font-size:12px;vertical-alignment:center;}
-                Rectangle{horizontal-stretch:1;}
-                Action{label:"IN";width:42px;min-height:30px;active:root.wave-input;clicked=>{root.wave-input=true;}}
-                Action{label:"OUT";width:42px;min-height:30px;active:!root.wave-input;clicked=>{root.wave-input=false;}}
-                Action{label:"TUNER";width:74px;min-height:30px;clicked=>{root.tuner-open=true;}}
-            }
-            Image{source:root.waveform;image-fit:fill;vertical-stretch:1;}
-            HorizontalLayout {height:15px;Text{text:"−2 s";font-size:10px;color:Theme.dim;}Rectangle{horizontal-stretch:1;}Text{text:"0";font-size:10px;color:Theme.dim;}}
-        }
-        HorizontalLayout {
-            height:94px;spacing:12px;
-            for effect[i] in root.effects: Rectangle {
-                background: Theme.panel;border-radius:12px;border-width:1px;border-color:root.selected==i?Theme.accent:Theme.edge;
-                VerticalLayout {
-                    padding:8px;spacing:2px;
-                    Rectangle {vertical-stretch:1;
-                        Text{text:effect.name;font-size:13px;letter-spacing:1px;color:effect.enabled?Theme.ink:Theme.dim;horizontal-alignment:center;vertical-alignment:center;}
-                        TouchArea{mouse-cursor:pointer;clicked=>{root.select-effect(i);}}
-                    }
-                    Rectangle{height:25px;
-                        HorizontalLayout{alignment:center;spacing:7px;Rectangle{width:5px;height:5px;border-radius:3px;background:effect.enabled?Theme.accent:Theme.dim;}Text{text:effect.enabled?"ON":"OFF";font-size:10px;color:Theme.dim;}}
-                        TouchArea{mouse-cursor:pointer;clicked=>{root.toggle-effect(i);}}
-                    }
-                }
-            }
-        }
-        Rectangle {
-            background:Theme.panel;border-radius:18px;border-width:1px;border-color:Theme.edge;vertical-stretch:1;min-height:284px;
+    Rectangle { x: 0px; y:0px; width: parent.width; height:parent.height; background: @linear-gradient(130deg, Theme.bg 55%, Theme.glow); }
+    HorizontalLayout {
+        padding: 22px; spacing: 20px;
+        Glass {
+            width: 60px;
             VerticalLayout {
-                padding:24px;spacing:12px;
-                HorizontalLayout {height:50px;
-                    VerticalLayout{width:125px;spacing:4px;Text{text:root.effect-number;color:Theme.dim;font-size:10px;letter-spacing:2px;}Text{text:root.effect-name;color:Theme.ink;font-size:24px;letter-spacing:2px;font-weight:500;}}
-                    Rectangle{horizontal-stretch:1;}
-                    if root.selected==3: Action{label:"EQ";width:52px;active:root.eq-open;clicked=>{root.eq-open=!root.eq-open;root.eq-changed();}}
-                    if root.mode-names.length>0: ComboBox{width:148px;model:root.mode-names;current-index <=> root.mode-index;selected(value)=>{root.mode-changed(self.current-index);}}
-                    if root.selected==5: Action{label:"TAP";width:64px;clicked=>{root.tap-delay();}}
-                }
-                HorizontalLayout{alignment:center;spacing:28px;
-                    for parameter[i] in root.parameters: Dial{parameter:parameter;compact:root.parameters.length>3;edited(value)=>{root.param-edited(parameter.index,value);}numeric(text)=>{root.param-numeric(parameter.index,text);}}
-                }
+                padding: 8px; spacing: 16px;
+                Text {text:"S";color:Theme.ink;font-size:22px;font-weight:600;horizontal-alignment:center;height:62px;vertical-alignment:center;}
+                Action {label:"◫";active:root.page==0;primary:root.page==0;clicked=>{root.page=0;}}
+                Action {label:"≋";active:root.page==1;primary:root.page==1;clicked=>{root.page=1;}}
+                Action {label:"♮";clicked=>{root.tuner-open=true;}}
+                Rectangle{vertical-stretch:1;background:Theme.clear;}
+                Action {label:root.dark?"☀":"☾";clicked=>{root.dark=!root.dark;root.theme-changed(root.dark);}}
+                Action {label:"⚙";clicked=>{root.settings-open=true;}}
             }
         }
-        HorizontalLayout {
-            height:42px;spacing:16px;
-            Rectangle{width:6px;Rectangle{y:(parent.height - 6px)/2;width:6px;height:6px;border-radius:3px;background:root.running?Theme.accent:Theme.dim;}}
-            Text{text:root.status;color:Theme.dim;font-size:12px;vertical-alignment:center;min-width:130px;}
-            Rectangle{horizontal-stretch:1;}
-            Text{text:"IN";font-size:10px;color:root.input-clip?#f09583:Theme.dim;vertical-alignment:center;}
-            Rectangle{width:65px;Rectangle{y:(parent.height - 5px)/2;height:5px;border-radius:3px;background:Theme.edge;Rectangle{width:parent.width*clamp(root.input-level,0,1);height:parent.height;border-radius:3px;background:root.input-clip?#f09583:Theme.accent;}}}
-            Text{text:"OUT";font-size:10px;color:root.output-clip?#f09583:Theme.dim;vertical-alignment:center;}
-            Rectangle{width:65px;Rectangle{y:(parent.height - 5px)/2;height:5px;border-radius:3px;background:Theme.edge;Rectangle{width:parent.width*clamp(root.output-level,0,1);height:parent.height;border-radius:3px;background:root.output-clip?#f09583:Theme.accent;}}}
-            Text{text:round(root.output-db)+" dB";font-size:12px;color:Theme.ink;vertical-alignment:center;width:48px;}
-            Slider{width:110px;minimum:-60;maximum:0;value:root.output-db;changed(value)=>{root.output-changed(value);}}
-            Action{label:root.busy?"準備中…":root.running?"停止":"接続";primary:!root.running;enabled:!root.busy&&!root.demo;width:80px;clicked=>{root.toggle-engine();}}
+        VerticalLayout {
+            spacing: 14px;
+            HorizontalLayout {
+                height:46px;spacing:12px;
+                Text{text:"SmartEffecter";font-size:15px;color:Theme.ink;vertical-alignment:center;width:126px;}
+                Action{label:"Guitar";width:76px;active:!root.bass-mode;clicked=>{root.bass-changed(false);}}
+                Action{label:"Bass";width:76px;active:root.bass-mode;clicked=>{root.bass-changed(true);}}
+                Rectangle{horizontal-stretch:1;background:Theme.clear;}
+                ComboBox{width:182px;model:root.preset-names;current-index <=> root.preset-index;selected(value)=>{root.preset-selected(self.current-index);}}
+                Action{label:root.dirty?"保存 •":"保存";width:70px;clicked=>{root.presets-open=true;}}
+            }
+            if root.waveform-enabled: Glass {
+                height:226px;
+                VerticalLayout{padding:18px;spacing:8px;
+                    HorizontalLayout{height:32px;spacing:8px;
+                        Text{text:"SCOPE";font-size:11px;color:Theme.dim;vertical-alignment:center;}
+                        Rectangle{horizontal-stretch:1;background:Theme.clear;}
+                        Action{label:"IN";width:48px;min-height:30px;active:root.wave-input;clicked=>{root.wave-input=true;}}
+                        Action{label:"OUT";width:48px;min-height:30px;active:!root.wave-input;clicked=>{root.wave-input=false;}}
+                        Action{label:root.scope-ms+" ms";width:68px;min-height:30px;clicked=>{root.scope-ms=root.scope-ms==40?80:root.scope-ms==80?20:40;}}
+                    }
+                    Image{source:root.waveform;image-fit:fill;vertical-stretch:1;}
+                    HorizontalLayout{height:16px;Text{text:"楽器のみ";font-size:11px;color:Theme.dim;}Rectangle{horizontal-stretch:1;background:Theme.clear;}Text{text:root.demo?"DEMO":root.device-label;font-size:11px;color:Theme.dim;}}
+                }
+            }
+            if root.page==0: VerticalLayout {
+                spacing:14px;
+                Glass {
+                    height:86px;
+                    HorizontalLayout{padding:9px;spacing:7px;
+                        for effect[i] in root.effects: Rectangle{
+                            border-radius:22px;border-width:1px;border-color:root.selected==i?Theme.accent:Theme.clear;
+                            background:root.selected==i?@linear-gradient(135deg,Theme.glow,Theme.elevated):Theme.clear;
+                            VerticalLayout{padding:4px;spacing:3px;
+                                Action{label:effect.name;min-height:29px;clicked=>{root.select-effect(i);}}
+                                Action{label:effect.enabled?"● ON":"○ OFF";active:effect.enabled;min-height:22px;clicked=>{root.toggle-effect(i);}}
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout{spacing:14px;
+                    Glass{
+                        horizontal-stretch:1;min-height:266px;
+                        VerticalLayout{padding:22px;spacing:14px;
+                            HorizontalLayout{height:38px;spacing:10px;
+                                Text{text:root.effect-name;color:Theme.ink;font-size:16px;vertical-alignment:center;}
+                                Rectangle{horizontal-stretch:1;background:Theme.clear;}
+                                if root.selected==3: Action{label:"EQ";width:48px;active:root.eq-open;clicked=>{root.eq-open=!root.eq-open;root.eq-changed();}}
+                                if root.mode-names.length>0: ComboBox{width:135px;model:root.mode-names;current-index <=> root.mode-index;selected(value)=>{root.mode-changed(self.current-index);}}
+                                if root.selected==5: Action{label:"TAP";width:54px;clicked=>{root.tap-delay();}}
+                            }
+                            HorizontalLayout{alignment:center;spacing:8px;
+                                for parameter in root.parameters: Dial{parameter:parameter;compact:root.parameters.length>3;edited(value)=>{root.param-edited(parameter.index,value);}numeric(text)=>{root.param-numeric(parameter.index,text);}}
+                            }
+                        }
+                    }
+                    Glass{width:180px;
+                        VerticalLayout{padding:18px;spacing:10px;
+                            Text{text:"OUTPUT";font-size:11px;color:Theme.dim;height:20px;}
+                            Dial{parameter:{index:0,name:"",value:root.output-db,minimum:-60,maximum:0,step:1,default-value:-12,display:round(root.output-db)+" dB"};edited(value)=>{root.output-changed(value);}numeric(text)=>{root.output-changed(clamp(text.to-float(),-60,0));}}
+                            HorizontalLayout{spacing:8px;Action{label:"Bypass";active:root.bypassed;clicked=>{root.bypassed=!root.bypassed;}}Action{label:"Mute";active:root.muted;clicked=>{root.muted=!root.muted;}}}
+                        }
+                    }
+                }
+            }
+            if root.page==1: Glass {
+                vertical-stretch:1;
+                VerticalLayout{padding:24px;spacing:18px;
+                    Text{text:"ミキサー";color:Theme.ink;font-size:16px;height:28px;}
+                    HorizontalLayout{alignment:center;spacing:30px;
+                        Dial{parameter:{index:0,name:"楽器",value:root.instrument-db,minimum:-60,maximum:6,step:1,default-value:0,display:round(root.instrument-db)+" dB"};edited(v)=>{root.mixer-changed(false,v);}numeric(t)=>{root.mixer-changed(false,t.to-float());}}
+                        Dial{parameter:{index:0,name:"マイク",value:root.mic-db,minimum:-60,maximum:6,step:1,default-value:-12,display:round(root.mic-db)+" dB"};edited(v)=>{root.mixer-changed(true,v);}numeric(t)=>{root.mixer-changed(true,t.to-float());}}
+                        Dial{parameter:{index:0,name:"モニター",value:root.monitor-db,minimum:-60,maximum:6,step:1,default-value:-6,display:round(root.monitor-db)+" dB"};edited(v)=>{root.monitor-changed(v);}numeric(t)=>{root.monitor-changed(t.to-float());}}
+                    }
+                    Action{label:"入出力・マイク設定";clicked=>{root.settings-open=true;}}
+                }
+            }
+            HorizontalLayout{height:38px;spacing:12px;
+                Text{text:root.status;color:Theme.dim;font-size:11px;vertical-alignment:center;min-width:90px;}
+                Text{text:root.running?"推定 "+root.latency:"";color:Theme.dim;font-size:11px;vertical-alignment:center;}
+                Rectangle{horizontal-stretch:1;background:Theme.clear;}
+                Text{text:"IN";color:root.input-clip?Theme.warning:Theme.dim;font-size:10px;vertical-alignment:center;}
+                Rectangle{width:60px;background:Theme.clear;Rectangle{y:17px;height:4px;width:parent.width;background:Theme.track;border-radius:2px;Rectangle{height:parent.height;width:parent.width*clamp(root.input-level,0,1);background:root.input-clip?Theme.warning:Theme.accent;border-radius:2px;}}}
+                Text{text:"OUT";color:root.output-clip?Theme.warning:Theme.dim;font-size:10px;vertical-alignment:center;}
+                Rectangle{width:60px;background:Theme.clear;Rectangle{y:17px;height:4px;width:parent.width;background:Theme.track;border-radius:2px;Rectangle{height:parent.height;width:parent.width*clamp(root.output-level,0,1);background:root.output-clip?Theme.warning:Theme.accent;border-radius:2px;}}}
+                Action{label:root.busy?"準備中…":root.running?"停止":"接続";primary:!root.running;enabled:!root.busy&&!root.demo;width:82px;clicked=>{root.toggle-engine();}}
+            }
         }
     }
     if root.message!="" && !root.settings-open && !root.presets-open && !root.tuner-open && !root.about-open: Rectangle {
@@ -271,7 +333,7 @@ export component AppWindow inherits Window {
         HorizontalLayout {padding:8px;spacing:10px;Text{text:root.message;color:Theme.accent;font-size:12px;wrap:word-wrap;vertical-alignment:center;}Action{label:"閉じる";width:64px;clicked=>{root.message="";}}}
     }
     if root.settings-open: Rectangle {
-        background:#0009;TouchArea{}
+        background:Theme.overlay;TouchArea{}
         Rectangle {width:660px;height:min(720px, parent.height - 24px);x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;background:Theme.panel;border-radius:18px;border-width:1px;border-color:Theme.edge;
             ScrollView { VerticalLayout{padding:24px;spacing:12px;
                 HorizontalLayout{height:36px;Text{text:"オーディオ";font-size:20px;color:Theme.ink;vertical-alignment:center;}Rectangle{horizontal-stretch:1;}Action{label:"閉じる";width:64px;clicked=>{root.settings-open=false;}}}
@@ -280,7 +342,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout{height:38px;spacing:12px;Text{text:"出力";color:Theme.dim;width:42px;vertical-alignment:center;}ComboBox{model:root.output-names;current-index <=> root.output-index;enabled:!root.running&&!root.busy;horizontal-stretch:1;selected(value)=>{root.audio-config-changed();}}}
                 Text{text:root.virtual-output?"他アプリのマイク入力で CABLE Output を選択してください。":root.output-index==0?"同じ機器のASIO出力で最小遅延。":"Windows出力は同期補正を行うため、遅延が増えます。";font-size:11px;color:Theme.dim;}
                 HorizontalLayout{height:32px;spacing:10px;Action{label:"仮想出力を使う";active:root.virtual-output;enabled:!root.running&&!root.busy;clicked=>{root.select-virtual-output();}}Action{label:"仮想出力の設定";clicked=>{root.open-virtual-help();}}}
-                HorizontalLayout{height:30px;spacing:10px;CheckBox{text:"自分にはベースだけ返す";checked <=> root.monitor-enabled;enabled:!root.running&&!root.busy&&(root.output-index!=0||root.monitor-index!=0);toggled=>{root.audio-config-changed();}}}
+                HorizontalLayout{height:30px;spacing:10px;CheckBox{text:"自分には楽器だけ返す";checked <=> root.monitor-enabled;enabled:!root.running&&!root.busy&&(root.output-index!=0||root.monitor-index!=0);toggled=>{root.audio-config-changed();}}}
                 HorizontalLayout{height:38px;spacing:10px;Text{text:"自分用の出力";width:90px;color:Theme.dim;vertical-alignment:center;}ComboBox{model:root.monitor-names;current-index <=> root.monitor-index;enabled:!root.running&&!root.busy;horizontal-stretch:1;selected(value)=>{root.audio-config-changed();}}}
                 if root.monitor-index!=0: Text{text:"別の出力機器には同期バッファ分の遅延が加わります。";font-size:11px;color:Theme.dim;}
                 if root.monitor-enabled && (root.output-index!=0||root.monitor-index!=0): HorizontalLayout{height:30px;spacing:10px;Text{text:"モニター音量";width:90px;color:Theme.dim;vertical-alignment:center;}Slider{minimum:-60;maximum:6;value:root.monitor-db;changed(value)=>{root.monitor-changed(value);}}Text{text:round(root.monitor-db)+" dB";width:50px;color:Theme.ink;}}
@@ -291,7 +353,6 @@ export component AppWindow inherits Window {
                     ComboBox{model:root.buffer-names;current-index <=> root.buffer-index;enabled:!root.running&&!root.busy;selected(value)=>{root.audio-config-changed();}}
                 }
                 HorizontalLayout{height:34px;spacing:12px;Text{text:"入力ゲイン";color:Theme.dim;width:80px;vertical-alignment:center;}Slider{minimum:-24;maximum:24;value:root.input-db;changed(value)=>{root.input-changed(value);}}Text{text:round(root.input-db)+" dB";color:Theme.ink;width:50px;vertical-alignment:center;}}
-                HorizontalLayout{height:34px;spacing:10px;CheckBox{text:"ベース用";checked <=> root.bass-mode;toggled=>{root.bass-changed(self.checked);}}Action{label:"Bass Clean";clicked=>{root.bass-preset(false);}}Action{label:"Bass Drive";clicked=>{root.bass-preset(true);}}}
                 HorizontalLayout{height:38px;spacing:10px;Text{text:"マイク";width:60px;color:Theme.dim;vertical-alignment:center;}ComboBox{model:root.mic-names;current-index <=> root.mic-index;enabled:!root.running&&!root.busy;horizontal-stretch:1;selected(value)=>{root.audio-config-changed();}}}
                 HorizontalLayout{height:30px;spacing:10px;Text{text:"マイクCH (Enter)";color:Theme.dim;width:100px;vertical-alignment:center;}LineEdit{text:round(root.mic-channel);enabled:!root.running&&!root.busy;accepted=>{root.mic-channel=max(1,min(64,self.text.to-float()));root.audio-config-changed();}}Text{text:"別USBマイクは同期バッファあり";color:Theme.dim;font-size:11px;}}
                 HorizontalLayout{height:30px;spacing:10px;Text{text:"楽器音量";width:80px;color:Theme.dim;vertical-alignment:center;}Slider{minimum:-60;maximum:6;value:root.instrument-db;changed(value)=>{root.mixer-changed(false,value);}}Text{text:round(root.instrument-db)+" dB";width:50px;color:Theme.ink;}}
@@ -308,7 +369,7 @@ export component AppWindow inherits Window {
     }
     }
     if root.presets-open: Rectangle {
-        background:#0009;TouchArea{}
+        background:Theme.overlay;TouchArea{}
         Rectangle{width:490px;height:285px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;background:Theme.panel;border-radius:18px;
             VerticalLayout{padding:28px;spacing:18px;
                 HorizontalLayout{height:36px;Text{text:"プリセット";font-size:20px;color:Theme.ink;}Rectangle{horizontal-stretch:1;}Action{label:"閉じる";width:64px;clicked=>{root.presets-open=false;}}}
@@ -319,7 +380,7 @@ export component AppWindow inherits Window {
         }
     }
     if root.tuner-open: Rectangle {
-        background:#0009;TouchArea{}
+        background:Theme.overlay;TouchArea{}
         Rectangle{width:440px;height:360px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;background:Theme.panel;border-radius:18px;
             VerticalLayout{padding:28px;spacing:18px;
                 HorizontalLayout{height:36px;Text{text:"TUNER";font-size:16px;letter-spacing:2px;color:Theme.dim;}Rectangle{horizontal-stretch:1;}Action{label:"閉じる";width:64px;clicked=>{root.tuner-open=false;}}}
@@ -334,7 +395,7 @@ export component AppWindow inherits Window {
         }
     }
     if root.about-open: Rectangle {
-        background:#0009; TouchArea{}
+        background:Theme.overlay; TouchArea{}
         Rectangle {
             width:440px;height:300px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;
             background:Theme.panel;border-radius:18px;
@@ -347,3 +408,4 @@ export component AppWindow inherits Window {
         }
     }
 }
+

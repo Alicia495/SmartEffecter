@@ -202,6 +202,9 @@ pub struct Preset {
 pub struct Settings {
     pub schema: u32,
     pub tone: Tone,
+    /// Inactive instrument's working tone. Optional for v1 settings migration.
+    pub guitar_tone: Option<Tone>,
+    pub bass_tone: Option<Tone>,
     pub device: String,
     /// Empty uses ASIO; virtual:vb-cable resolves VB-CABLE; otherwise a WASAPI endpoint ID.
     pub output_device: String,
@@ -226,6 +229,8 @@ impl Default for Settings {
         Self {
             schema: 1,
             tone: Tone::default(),
+            guitar_tone: None,
+            bass_tone: None,
             device: String::new(),
             output_device: String::new(),
             sample_rate: 48000,
@@ -255,6 +260,22 @@ pub fn data_dir() -> PathBuf {
         })
 }
 impl Settings {
+    pub fn switch_instrument(&mut self, bass: bool) {
+        if self.tone.bass == bass {
+            return;
+        }
+        if self.tone.bass {
+            self.bass_tone = Some(self.tone);
+        } else {
+            self.guitar_tone = Some(self.tone);
+        }
+        self.tone = if bass {
+            self.bass_tone.unwrap_or_else(|| Tone::bass_factory(false))
+        } else {
+            self.guitar_tone.unwrap_or_default()
+        };
+        self.tone.bass = bass;
+    }
     pub fn backup_unreadable() -> Result<PathBuf, String> {
         let source = data_dir().join("settings.json");
         let stamp = std::time::SystemTime::now()
@@ -277,6 +298,12 @@ impl Settings {
             return Err("設定ファイルのバージョンが未対応です".into());
         }
         settings.tone.sanitize();
+        for tone in [&mut settings.guitar_tone, &mut settings.bass_tone]
+            .into_iter()
+            .flatten()
+        {
+            tone.sanitize();
+        }
         settings.sample_rate = if matches!(settings.sample_rate, 44100 | 48000) {
             settings.sample_rate
         } else {
@@ -385,6 +412,19 @@ impl SharedControls {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn instrument_banks_survive_switch_and_serialization() {
+        let mut s = Settings::default();
+        s.tone.effects[2].params[0] = 77.;
+        s.switch_instrument(true);
+        assert!(s.tone.bass);
+        s.tone.effects[2].params[0] = 19.;
+        s.switch_instrument(false);
+        assert_eq!(s.tone.effects[2].params[0], 77.);
+        let mut copy: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        copy.switch_instrument(true);
+        assert_eq!(copy.tone.effects[2].params[0], 19.);
+    }
     #[test]
     fn older_settings_without_mixer_or_bass_still_load() {
         let mut json = serde_json::to_value(Settings::default()).unwrap();

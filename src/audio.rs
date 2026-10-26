@@ -528,7 +528,7 @@ impl Session {
             }
         }
         let (producer, consumer) = RingBuffer::new((settings.buffer as usize * 4).max(8192));
-        let (wave_tx, wave_rx) = RingBuffer::new(1024);
+        let (wave_tx, wave_rx) = RingBuffer::new(8192);
         let (tuner_tx, tuner_rx) = RingBuffer::new(8192);
         let metrics = Arc::new(Metrics::default());
         if settings.mic_device == "asio"
@@ -899,6 +899,11 @@ impl Capture {
             self.instrument_gain += (instrument_target - self.instrument_gain) * 0.004;
             self.mic_gain += (mic_target - self.mic_gain) * 0.004;
             self.monitor_gain += (monitor_target - self.monitor_gain) * 0.004;
+            // Oscilloscope taps instrument audio before the microphone mixer.
+            self.point.low_in = input;
+            self.point.high_in = input;
+            self.point.low_out = (out[0] + out[1]) * 0.5 * self.instrument_gain;
+            self.point.high_out = self.point.low_out;
             if let Some(monitor) = &mut self.monitor {
                 let samples =
                     out.map(|s| (s * self.instrument_gain * self.monitor_gain).clamp(-1., 1.));
@@ -939,16 +944,12 @@ impl Capture {
             {
                 self.metrics.overflow_frames.fetch_add(1, Ordering::Relaxed);
             }
-            self.point.low_in = self.point.low_in.min(input);
-            self.point.high_in = self.point.high_in.max(input);
-            self.point.low_out = self.point.low_out.min(out[0]).min(out[1]);
-            self.point.high_out = self.point.high_out.max(out[0]).max(out[1]);
             self.point_samples += 1;
             self.sample_count += 1;
             if self.sample_count.is_multiple_of(4) {
                 let _ = self.tuner.push(input);
             }
-            if self.point_samples >= self.rate / 200 {
+            if self.point_samples >= 4 {
                 self.point.sequence = self.sample_count;
                 self.point.frames = self.point_samples;
                 if self.wave.push(self.point).is_err() {
