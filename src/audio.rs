@@ -1384,7 +1384,7 @@ mod tests {
             .store(1f32.to_bits(), Ordering::Relaxed);
         let metrics = Arc::new(Metrics::default());
         let (producer, consumer) = RingBuffer::new(256);
-        let (wave, _wave_rx) = RingBuffer::new(100);
+        let (wave, mut wave_rx) = RingBuffer::new(100);
         let (tuner, _tuner_rx) = RingBuffer::new(4096);
         let (monitor_tx, mut monitor_rx) = RingBuffer::new(256);
         let mut capture = Capture {
@@ -1453,6 +1453,15 @@ mod tests {
         while let Ok(frame) = monitor_rx.pop() {
             assert!(frame.samples.iter().all(|v| (*v - 0.1).abs() < 1e-5));
         }
+        while wave_rx.pop().is_ok() {}
+        capture.run(&input, cpal::StreamInstant::ZERO);
+        playback.run(&mut output, cpal::StreamInstant::ZERO);
+        let scope = wave_rx.pop().unwrap();
+        assert!((scope.high_in - 0.2).abs() < 1e-5);
+        assert!(
+            (scope.high_out - 0.1).abs() < 1e-5,
+            "scope must exclude the 0.225 microphone mix"
+        );
 
         capture.controls.mute.store(1, Ordering::Relaxed);
         capture.run(&input, cpal::StreamInstant::ZERO);

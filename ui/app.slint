@@ -23,7 +23,6 @@ export global Theme {
 component Glass inherits Rectangle {
     border-radius: 30px; border-width: 1px; border-color: Theme.edge;
     background: @linear-gradient(135deg, Theme.elevated, Theme.panel 55%, Theme.panel);
-    Rectangle { x: 2px; y: 1px; width: parent.width - 4px; height: 1px; border-radius: 1px; background: Theme.sheen; }
     @children
 }
 component Ring inherits Path {
@@ -41,6 +40,8 @@ component Ring inherits Path {
     }
 }
 component Action inherits Rectangle {
+    in property <image> icon;
+    in property <bool> icon-only: false;
     in property <string> label;
     in property <bool> active;
     in property <bool> enabled: true;
@@ -55,7 +56,8 @@ component Action inherits Rectangle {
     forward-focus: keyboard;
     accessible-role: button; accessible-label: label; accessible-enabled: enabled;
     accessible-action-default => {if root.enabled {root.clicked();}}
-    Text { text: root.label; color: root.primary ? Theme.accent-ink : Theme.ink; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+    Text { visible: !root.icon-only; text: root.label; color: root.primary ? Theme.accent-ink : Theme.ink; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+    if root.icon-only: Image { source: root.icon; width:18px;height:18px;x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;colorize:root.primary?Theme.accent-ink:Theme.ink; }
     area := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => {root.clicked();} }
     keyboard := FocusScope {
         width: 0px; enabled: root.enabled;
@@ -72,10 +74,10 @@ component Dial inherits Rectangle {
     in property <bool> compact;
     callback edited(float);
     callback numeric(string);
+    private property <bool> editing: false;
     min-width: 115px;
     VerticalLayout {
         alignment: center; spacing: 13px;
-        Text {text: root.parameter.name; color: Theme.ink; font-size: 13px; horizontal-alignment: center; height: 20px;}
         knob := Rectangle {
             width: root.compact ? 92px : 116px; height: self.width;
             border-radius: self.width/2; border-width: 1px; border-color: keys.has-focus ? Theme.accent : Theme.clear;
@@ -94,7 +96,7 @@ component Dial inherits Rectangle {
                 x: 12px; y: 12px; width: parent.width - 24px; height: parent.height - 24px;
                 border-radius: self.width/2; border-width: 1px; border-color: Theme.edge;
                 background: @linear-gradient(145deg, Theme.elevated, Theme.panel);
-                Text {text: root.parameter.display; color: Theme.ink; font-size: root.compact ? 15px : 19px; horizontal-alignment:center;vertical-alignment:center;}
+                Text {visible:!root.editing;text: root.parameter.display; color: Theme.ink; font-size: root.compact ? 15px : 19px; horizontal-alignment:center;vertical-alignment:center;}
             }
             drag := TouchArea {
                 property <length> origin-y;
@@ -102,8 +104,17 @@ component Dial inherits Rectangle {
                 mouse-cursor: ns-resize;
                 pointer-event(event) => {if event.kind == PointerEventKind.down { keys.focus();self.origin-y=self.mouse-y;self.origin-value=root.parameter.value; }}
                 moved => {if self.pressed {root.edited(clamp(self.origin-value+(self.origin-y - self.mouse-y)/180px*(root.parameter.maximum - root.parameter.minimum),root.parameter.minimum,root.parameter.maximum));}}
-                double-clicked => {root.edited(root.parameter.default-value);}
+                double-clicked => {root.editing=true;entry.text=root.parameter.display;entry.focus();entry.select-all();}
                 scroll-event(event) => {root.edited(clamp(root.parameter.value+event.delta-y/40px*root.parameter.step,root.parameter.minimum,root.parameter.maximum));accept}
+            }
+            entry := TextInput {
+                visible:root.editing;
+                x:12px;y:(parent.height - self.height)/2;width:parent.width - 24px;height:32px;
+                color:Theme.ink;selection-background-color:Theme.accent;selection-foreground-color:Theme.accent-ink;
+                horizontal-alignment:center;vertical-alignment:center;font-size:root.compact?15px:19px;
+                single-line:true;
+                accepted=>{root.numeric(self.text);root.editing=false;keys.focus();}
+                key-pressed(event)=>{if event.text==Key.Escape {root.editing=false;keys.focus();return accept;}return reject;}
             }
             keys := FocusScope {
                 width: 0px;
@@ -114,13 +125,15 @@ component Dial inherits Rectangle {
                     if event.text == Key.DownArrow || event.text == Key.LeftArrow {
                         root.edited(root.parameter.value - root.parameter.step); return accept;
                     }
+                    if event.text == Key.Return {root.editing=true;entry.text=root.parameter.display;entry.focus();entry.select-all();return accept;}
+                    if event.text == Key.Delete {root.edited(root.parameter.default-value);return accept;}
                     if event.text == Key.Home {root.edited(root.parameter.minimum); return accept;}
                     if event.text == Key.End {root.edited(root.parameter.maximum); return accept;}
                     return reject;
                 }
             }
         }
-        LineEdit { text: root.parameter.display; horizontal-alignment: center; width: 110px; height: 32px; accepted => {root.numeric(self.text);} }
+        Text {text: root.parameter.name; color: Theme.ink; font-size: 13px; horizontal-alignment: center; height: 20px;}
     }
 }
 export component AppWindow inherits Window {
@@ -147,7 +160,7 @@ export component AppWindow inherits Window {
     in-out property <bool> demo: false;
     in property <[EffectRow]> effects;
     in property <[ParameterRow]> parameters;
-    in-out property <int> selected: 3;
+    in-out property <int> selected: 2;
     in-out property <bool> eq-open: false;
     in property <string> effect-name: "AMP";
     in property <string> effect-hint;
@@ -203,6 +216,7 @@ export component AppWindow inherits Window {
     callback preset-selected(int);
     callback preset-action(int,string);
     callback output-changed(float);
+    callback control-numeric(int, string);
     callback input-changed(float);
     callback device-changed(int);
     callback audio-config-changed;
@@ -230,12 +244,12 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 8px; spacing: 16px;
                 Text {text:"S";color:Theme.ink;font-size:22px;font-weight:600;horizontal-alignment:center;height:62px;vertical-alignment:center;}
-                Action {label:"◫";active:root.page==0;primary:root.page==0;clicked=>{root.page=0;}}
-                Action {label:"≋";active:root.page==1;primary:root.page==1;clicked=>{root.page=1;}}
-                Action {label:"♮";clicked=>{root.tuner-open=true;}}
+                Action {label:"エフェクト";icon-only:true;icon:@image-url("icons/effects.svg");active:root.page==0;primary:root.page==0;clicked=>{root.page=0;}}
+                Action {label:"ミキサー";icon-only:true;icon:@image-url("icons/mixer.svg");active:root.page==1;primary:root.page==1;clicked=>{root.page=1;}}
+                Action {label:"チューナー";icon-only:true;icon:@image-url("icons/tuner.svg");clicked=>{root.tuner-open=true;}}
                 Rectangle{vertical-stretch:1;background:Theme.clear;}
-                Action {label:root.dark?"☀":"☾";clicked=>{root.dark=!root.dark;root.theme-changed(root.dark);}}
-                Action {label:"⚙";clicked=>{root.settings-open=true;}}
+                Action {label:root.dark?"ライトモード":"ダークモード";icon-only:true;icon:root.dark?@image-url("icons/sun.svg"):@image-url("icons/moon.svg");clicked=>{root.dark=!root.dark;root.theme-changed(root.dark);}}
+                Action {label:"接続設定";icon-only:true;icon:@image-url("icons/settings.svg");clicked=>{root.settings-open=true;}}
             }
         }
         VerticalLayout {
@@ -297,7 +311,7 @@ export component AppWindow inherits Window {
                     Glass{width:180px;
                         VerticalLayout{padding:18px;spacing:10px;
                             Text{text:"OUTPUT";font-size:11px;color:Theme.dim;height:20px;}
-                            Dial{parameter:{index:0,name:"",value:root.output-db,minimum:-60,maximum:0,step:1,default-value:-12,display:round(root.output-db)+" dB"};edited(value)=>{root.output-changed(value);}numeric(text)=>{root.output-changed(clamp(text.to-float(),-60,0));}}
+                            Dial{parameter:{index:0,name:"",value:root.output-db,minimum:-60,maximum:0,step:1,default-value:-12,display:round(root.output-db)+" dB"};edited(value)=>{root.output-changed(value);}numeric(text)=>{root.control-numeric(0,text);}}
                             HorizontalLayout{spacing:8px;Action{label:"Bypass";active:root.bypassed;clicked=>{root.bypassed=!root.bypassed;}}Action{label:"Mute";active:root.muted;clicked=>{root.muted=!root.muted;}}}
                         }
                     }
@@ -308,9 +322,9 @@ export component AppWindow inherits Window {
                 VerticalLayout{padding:24px;spacing:18px;
                     Text{text:"ミキサー";color:Theme.ink;font-size:16px;height:28px;}
                     HorizontalLayout{alignment:center;spacing:30px;
-                        Dial{parameter:{index:0,name:"楽器",value:root.instrument-db,minimum:-60,maximum:6,step:1,default-value:0,display:round(root.instrument-db)+" dB"};edited(v)=>{root.mixer-changed(false,v);}numeric(t)=>{root.mixer-changed(false,t.to-float());}}
-                        Dial{parameter:{index:0,name:"マイク",value:root.mic-db,minimum:-60,maximum:6,step:1,default-value:-12,display:round(root.mic-db)+" dB"};edited(v)=>{root.mixer-changed(true,v);}numeric(t)=>{root.mixer-changed(true,t.to-float());}}
-                        Dial{parameter:{index:0,name:"モニター",value:root.monitor-db,minimum:-60,maximum:6,step:1,default-value:-6,display:round(root.monitor-db)+" dB"};edited(v)=>{root.monitor-changed(v);}numeric(t)=>{root.monitor-changed(t.to-float());}}
+                        Dial{parameter:{index:0,name:"楽器",value:root.instrument-db,minimum:-60,maximum:6,step:1,default-value:0,display:round(root.instrument-db)+" dB"};edited(v)=>{root.mixer-changed(false,v);}numeric(t)=>{root.control-numeric(1,t);}}
+                        Dial{parameter:{index:0,name:"マイク",value:root.mic-db,minimum:-60,maximum:6,step:1,default-value:-12,display:round(root.mic-db)+" dB"};edited(v)=>{root.mixer-changed(true,v);}numeric(t)=>{root.control-numeric(2,t);}}
+                        Dial{parameter:{index:0,name:"モニター",value:root.monitor-db,minimum:-60,maximum:6,step:1,default-value:-6,display:round(root.monitor-db)+" dB"};edited(v)=>{root.monitor-changed(v);}numeric(t)=>{root.control-numeric(3,t);}}
                     }
                     Action{label:"入出力・マイク設定";clicked=>{root.settings-open=true;}}
                 }

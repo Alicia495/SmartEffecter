@@ -91,6 +91,7 @@ pub fn image(
         }
         for yy in previous.min(y)..=previous.max(y) {
             put(x, yy, line);
+            put(x, yy.saturating_add(1), line);
         }
         previous = y;
     }
