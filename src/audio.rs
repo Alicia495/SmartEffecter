@@ -1,5 +1,5 @@
 use crate::{
-    dsp::Processor,
+    dsp::{Processor, soft_clip},
     state::{Settings, SharedControls, Tone},
 };
 use cpal::{
@@ -246,6 +246,18 @@ impl Microphone {
         let channel = settings.mic_channel;
         let rate = config.sample_rate();
         let format = config.sample_format();
+        // Validate before building the stream, as Session::open does: the
+        // capture callback silently discards formats it does not handle.
+        if !matches!(
+            format,
+            SampleFormat::F32
+                | SampleFormat::F64
+                | SampleFormat::I16
+                | SampleFormat::I24
+                | SampleFormat::I32
+        ) {
+            return Err(format!("未対応のマイク形式: {format}"));
+        }
         let (mut tx, queue) = RingBuffer::new((rate as usize / 2).max(8192));
         let metrics = Arc::new(Metrics::default());
         let errors = metrics.clone();
@@ -293,16 +305,6 @@ impl Microphone {
                 None,
             )
             .map_err(|e| format!("マイク入力: {e}"))?;
-        if !matches!(
-            format,
-            SampleFormat::F32
-                | SampleFormat::F64
-                | SampleFormat::I16
-                | SampleFormat::I24
-                | SampleFormat::I32
-        ) {
-            return Err(format!("未対応のマイク形式: {format}"));
-        }
         Ok(Self {
             stream,
             queue,
@@ -948,8 +950,10 @@ impl Capture {
             if out.iter().any(|v| v.abs() > 1.) {
                 self.metrics.output_clips.fetch_add(1, Ordering::Relaxed);
             }
+            // Soft-clip the summed mix so instrument plus microphone saturate
+            // instead of flat-topping; the clamp stays as a conversion guard.
             for sample in &mut out {
-                *sample = sample.clamp(-1., 1.);
+                *sample = soft_clip(*sample).clamp(-1., 1.);
             }
             if self
                 .producer

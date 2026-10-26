@@ -495,7 +495,9 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if !value.is_finite() {
                 return;
             }
-            s.settings.tone.output_db = value.clamp(-60., 0.);
+            // Gain dials declare a 1 dB step and display round(value); store
+            // the stepped value so the applied gain matches the display.
+            s.settings.tone.output_db = value.clamp(-60., 0.).round();
             ui.set_output_db(s.settings.tone.output_db);
             changed(ui, s);
         }
@@ -503,8 +505,8 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     bind!(on_input_changed, |ui: &AppWindow,
                              s: &mut AppState,
                              value: f32| {
-        s.settings.tone.input_db = value.clamp(-24., 24.);
-        ui.set_input_db(value);
+        s.settings.tone.input_db = value.clamp(-24., 24.).round();
+        ui.set_input_db(s.settings.tone.input_db);
         changed(ui, s);
     });
     bind!(
@@ -513,7 +515,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if !value.is_finite() {
                 return;
             }
-            s.settings.monitor_db = value.clamp(-60., 6.);
+            s.settings.monitor_db = value.clamp(-60., 6.).round();
             ui.set_monitor_db(s.settings.monitor_db);
             changed(ui, s);
         }
@@ -583,7 +585,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(ui) = weak.upgrade() {
                 let mut s = state.borrow_mut();
-                let value = value.clamp(-60., 6.);
+                let value = value.clamp(-60., 6.).round();
                 if mic {
                     s.settings.mic_db = value;
                     ui.set_mic_db(value);

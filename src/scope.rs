@@ -61,11 +61,16 @@ pub fn image(
             color.alpha(),
         ]);
     };
-    for y in 0..height {
+    // Draw the grid lines directly: scanning all 180k pixels with two modulo
+    // tests per frame wrote the same ~15k grid pixels for ~12x the work.
+    for x in (0..width).step_by(100) {
+        for y in 0..height {
+            put(x, y, grid);
+        }
+    }
+    for y in (0..height).step_by(30) {
         for x in 0..width {
-            if x % 100 == 0 || y % 30 == 0 {
-                put(x, y, grid);
-            }
+            put(x, y, grid);
         }
     }
     let samples: Vec<f32> = history
