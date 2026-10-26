@@ -873,6 +873,8 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         smoke_timer.start(slint::TimerMode::SingleShot,Duration::from_millis(1500),move||{
         let ui=weak.upgrade().unwrap();
         let click=|x,y|{let position=slint::LogicalPosition::new(x,y);ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed{position,button:slint::platform::PointerEventButton::Left});ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased{position,button:slint::platform::PointerEventButton::Left});};
+        click(1106.,116.);assert_eq!(ui.get_scope_ms(),80);ui.set_scope_ms(40);
+        click(983.,116.);assert!(ui.get_wave_input());click(1040.,116.);assert!(!ui.get_wave_input());
         click(180.,351.);assert_eq!(ui.get_selected(),0);click(475.,351.);assert_eq!(ui.get_selected(),2,"effect selection must work by pointer");
         let before=ui.get_effects().row_data(2).unwrap().enabled;click(475.,383.);assert_ne!(ui.get_effects().row_data(2).unwrap().enabled,before,"on/off must be separate from selection");
         // Exercise the native pointer/key path, not only callback invocation.
@@ -928,8 +930,11 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ui.invoke_preset_action(3,"".into());
         ui.set_message("".into());ui.set_settings_open(false);ui.set_dark(true);save_png("artifacts/ui-smoke-dark.png",&ui.window().take_snapshot().unwrap()).unwrap();
         ui.set_dark(false);ui.invoke_theme_changed(false);save_png("artifacts/ui-smoke-light.png",&ui.window().take_snapshot().unwrap()).unwrap();ui.set_settings_open(true);save_png("artifacts/ui-smoke-settings-light.png",&ui.window().take_snapshot().unwrap()).unwrap();
+        ui.set_settings_open(false);ui.invoke_preset_action(0,"Theme persistence smoke".into());
+        let saved=Settings::load().unwrap();assert!(!saved.dark);assert!(saved.guitar_tone.is_some());assert!(saved.bass_tone.is_some());
+        ui.invoke_preset_action(3,"".into());
         ui.set_settings_open(false);ui.set_tuner_open(true);save_png("artifacts/ui-smoke-tuner.png",&ui.window().take_snapshot().unwrap()).unwrap();
-        std::fs::write("artifacts/ui-smoke.json",r#"{"passed":true,"checks":["pointer effect selection","pointer independent bypass","parameter edit","numeric edit","pointer mute","knob drag","knob keyboard","center numeric keyboard entry","collapsed amp level mapping","EQ expansion","Windows output selection persists","virtual output selection persists","bass monitor settings persist","factory preset","bass preset","mixer gain and microphone selection persistence","save and reload","rename and reload","delete and reload","dark light and tuner snapshots","instrument tabs preserve independent tones","sidebar mixer navigation","unit-aware output and mixer numeric edits"]}"#).unwrap();
+        std::fs::write("artifacts/ui-smoke.json",r#"{"passed":true,"checks":["pointer effect selection","pointer independent bypass","parameter edit","numeric edit","pointer mute","knob drag","knob keyboard","center numeric keyboard entry","scope source and timebase pointer controls","theme and instrument banks persist","collapsed amp level mapping","EQ expansion","Windows output selection persists","virtual output selection persists","bass monitor settings persist","factory preset","bass preset","mixer gain and microphone selection persistence","save and reload","rename and reload","delete and reload","dark light and tuner snapshots","instrument tabs preserve independent tones","sidebar mixer navigation","unit-aware output and mixer numeric edits"]}"#).unwrap();
         let _=slint::quit_event_loop();
     });
     }

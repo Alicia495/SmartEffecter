@@ -10,7 +10,7 @@ export global Theme {
     out property <color> ink: dark ? #f4eff4 : #261d27;
     out property <color> dim: dark ? #b5aab4 : #6d5a69;
     out property <color> accent: dark ? #ff87bf : #ba286e;
-    out property <color> accent-deep: dark ? #c21b70 : #f5bad5;
+    out property <color> accent-deep: dark ? #e45196 : #981b56;
     out property <color> accent-ink: dark ? #240c18 : #ffffff;
     out property <color> glow: dark ? #7f244c : #e7c6d7;
     out property <color> sheen: dark ? #ffffff12 : #ffffffcc;
@@ -49,7 +49,7 @@ component Action inherits Rectangle {
     callback clicked;
     min-width: 40px; min-height: 38px;
     border-radius: 22px;
-    background: primary ? Theme.accent : active ? Theme.elevated : area.has-hover ? Theme.elevated : Theme.clear;
+    background: primary ? @linear-gradient(140deg, Theme.accent, Theme.accent-deep) : active ? Theme.elevated : area.has-hover ? Theme.elevated : Theme.clear;
     border-width: primary ? 0px : 1px;
     border-color: active || keyboard.has-focus ? Theme.accent : Theme.edge;
     opacity: enabled ? 1 : 0.4;

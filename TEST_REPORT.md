@@ -1,5 +1,17 @@
 # 検証結果
 
+## Studio UI 開発版（2026-10-26）
+
+- ブランチ: `codex/bento-glass-studio`。既存のv1.0設定を保ったまま読み込める形式で楽器別音色を追加。
+- `cargo test --locked`: 28件成功。音声コールバックのヒープ割当0、マイクを除いた波形取得、楽器別音色の往復切替・JSON復元、トリガー位置、表示データ欠落時の履歴破棄を確認。
+- `cargo clippy --all-targets --locked -- -D warnings` と `cargo fmt --check`: 成功。
+- ネイティブUIスモーク: ポインターによる選択／独立ON・OFF／ノブドラッグ／Mute、矢印キー、中央数値のEnter入力、Guitar / Bass、ミキサー、波形IN / OUT・時間軸、単位付き音量入力、プリセット保存・改名・削除・再読込を検証。
+- ダーク／ライト、最小サイズ付近のEQ全展開、ミキサー、設定スクロール、チューナーを実際のウィンドウスナップショットで確認。画像は `artifacts/studio-*.png` および `artifacts/ui-smoke-*.png`。
+- M-Track SOLO / 48 kHz / 32 samples / 全エフェクト / 波形更新あり / 出力ミュートで15.02秒の実機試行。入出力各22,512ブロック、期限超過・音声エラー・欠落・オーバーフロー・波形ドロップはいずれも0。処理最大321 µs。記録: `artifacts/studio-live.json`。
+- 上記の往復遅延 **6.061 msはドライバー情報からの推定**。電気的な往復遅延、実演奏の聴感、長時間連続稼働、AG03MK2、Discord受信音はこの変更では未確認。
+- 配色は `ui/app.slint` の `Theme` に集約。Rust側の波形描画も同じテーマのaccent / scope-gridを使用し、独自のRGB定数は置かない。アイコンの白はテーマ色で着色するマスク。
+- `scripts/build.ps1` で `dist/GuitarSmartEffecter.exe` を更新。配布用exeでもUIスモーク成功、ビルド元とのSHA-256一致を確認。以前のexeは同じdist内の日時付きファイルに退避。
+
 ## v1.0（2026-10-26）
 
 - バージョン1.0.0で再ビルド。CLIのバージョン出力を確認。

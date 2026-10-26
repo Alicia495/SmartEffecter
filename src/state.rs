@@ -429,6 +429,8 @@ mod tests {
     fn older_settings_without_mixer_or_bass_still_load() {
         let mut json = serde_json::to_value(Settings::default()).unwrap();
         for key in [
+            "guitar_tone",
+            "bass_tone",
             "mic_device",
             "mic_channel",
             "mic_db",
