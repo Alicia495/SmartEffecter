@@ -213,6 +213,7 @@ pub struct Settings {
     pub input_channel: usize,
     /// Empty disables, "asio" uses another channel, otherwise a WASAPI ID.
     pub mic_device: String,
+    pub mic_enabled: bool,
     pub mic_channel: usize,
     pub instrument_db: f32,
     pub mic_db: f32,
@@ -237,6 +238,7 @@ impl Default for Settings {
             buffer: 32,
             input_channel: 1,
             mic_device: String::new(),
+            mic_enabled: true,
             mic_channel: 0,
             instrument_db: 0.,
             mic_db: -12.,
@@ -413,6 +415,20 @@ impl SharedControls {
 mod tests {
     use super::*;
     #[test]
+    fn microphone_switch_persists_without_losing_route_or_level() {
+        let settings = Settings {
+            mic_enabled: false,
+            mic_device: "asio".into(),
+            mic_db: -18.,
+            ..Settings::default()
+        };
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(!restored.mic_enabled);
+        assert_eq!(restored.mic_device, "asio");
+        assert_eq!(restored.mic_db, -18.);
+    }
+    #[test]
     fn instrument_banks_survive_switch_and_serialization() {
         let mut s = Settings::default();
         s.tone.effects[2].params[0] = 77.;
@@ -429,6 +445,7 @@ mod tests {
     fn older_settings_without_mixer_or_bass_still_load() {
         let mut json = serde_json::to_value(Settings::default()).unwrap();
         for key in [
+            "mic_enabled",
             "guitar_tone",
             "bass_tone",
             "mic_device",
@@ -445,6 +462,7 @@ mod tests {
         let settings: Settings = serde_json::from_value(json).unwrap();
         assert!(!settings.tone.bass);
         assert!(settings.mic_device.is_empty());
+        assert!(settings.mic_enabled);
         assert_eq!(settings.instrument_db, 0.);
         assert!(settings.monitor_device.is_empty());
     }

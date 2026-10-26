@@ -207,6 +207,8 @@ export component AppWindow inherits Window {
     in-out property <float> mic-channel: 1;
     in property <float> instrument-db;
     in property <float> mic-db;
+    in property <bool> mic-enabled: true;
+    callback mic-enabled-changed(bool);
     callback bass-changed(bool);
     callback bass-preset(bool);
     callback mixer-changed(bool, float);
@@ -320,7 +322,7 @@ export component AppWindow inherits Window {
             if root.page==1: Glass {
                 vertical-stretch:1;
                 VerticalLayout{padding:24px;spacing:18px;
-                    Text{text:"ミキサー";color:Theme.ink;font-size:16px;height:28px;}
+                    HorizontalLayout{height:38px;Text{text:"ミキサー";color:Theme.ink;font-size:16px;vertical-alignment:center;}Rectangle{horizontal-stretch:1;background:Theme.clear;}Action{label:root.mic-enabled?"マイク ON":"マイク OFF";active:root.mic-enabled;width:120px;enabled:!root.busy;clicked=>{root.mic-enabled-changed(!root.mic-enabled);}}}
                     HorizontalLayout{alignment:center;spacing:30px;
                         Dial{parameter:{index:0,name:"楽器",value:root.instrument-db,minimum:-60,maximum:6,step:1,default-value:0,display:round(root.instrument-db)+" dB"};edited(v)=>{root.mixer-changed(false,v);}numeric(t)=>{root.control-numeric(1,t);}}
                         Dial{parameter:{index:0,name:"マイク",value:root.mic-db,minimum:-60,maximum:6,step:1,default-value:-12,display:round(root.mic-db)+" dB"};edited(v)=>{root.mixer-changed(true,v);}numeric(t)=>{root.control-numeric(2,t);}}
@@ -367,6 +369,7 @@ export component AppWindow inherits Window {
                     ComboBox{model:root.buffer-names;current-index <=> root.buffer-index;enabled:!root.running&&!root.busy;selected(value)=>{root.audio-config-changed();}}
                 }
                 HorizontalLayout{height:34px;spacing:12px;Text{text:"入力ゲイン";color:Theme.dim;width:80px;vertical-alignment:center;}Slider{minimum:-24;maximum:24;value:root.input-db;changed(value)=>{root.input-changed(value);}}Text{text:round(root.input-db)+" dB";color:Theme.ink;width:50px;vertical-alignment:center;}}
+                Action{label:root.mic-enabled?"マイク入力 ON":"マイク入力 OFF";active:root.mic-enabled;enabled:!root.busy;clicked=>{root.mic-enabled-changed(!root.mic-enabled);}}
                 HorizontalLayout{height:38px;spacing:10px;Text{text:"マイク";width:60px;color:Theme.dim;vertical-alignment:center;}ComboBox{model:root.mic-names;current-index <=> root.mic-index;enabled:!root.running&&!root.busy;horizontal-stretch:1;selected(value)=>{root.audio-config-changed();}}}
                 HorizontalLayout{height:30px;spacing:10px;Text{text:"マイクCH (Enter)";color:Theme.dim;width:100px;vertical-alignment:center;}LineEdit{text:round(root.mic-channel);enabled:!root.running&&!root.busy;accepted=>{root.mic-channel=max(1,min(64,self.text.to-float()));root.audio-config-changed();}}Text{text:"別USBマイクは同期バッファあり";color:Theme.dim;font-size:11px;}}
                 HorizontalLayout{height:30px;spacing:10px;Text{text:"楽器音量";width:80px;color:Theme.dim;vertical-alignment:center;}Slider{minimum:-60;maximum:6;value:root.instrument-db;changed(value)=>{root.mixer-changed(false,value);}}Text{text:round(root.instrument-db)+" dB";width:50px;color:Theme.ink;}}

@@ -96,6 +96,7 @@ fn refresh_effect(ui: &AppWindow, state: &mut AppState) {
     ui.set_bass_mode(state.settings.tone.bass);
     ui.set_instrument_db(state.settings.instrument_db);
     ui.set_mic_db(state.settings.mic_db);
+    ui.set_mic_enabled(state.settings.mic_enabled);
     ui.set_monitor_enabled(state.settings.monitor_enabled);
     ui.set_monitor_db(state.settings.monitor_db);
 }
@@ -543,6 +544,39 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let state = state.clone();
+        let commands = commands.clone();
+        ui.on_mic_enabled_changed(move |enabled| {
+            if let Some(ui) = weak.upgrade() {
+                if ui.get_busy() {
+                    return;
+                }
+                let mut s = state.borrow_mut();
+                if s.settings.mic_enabled == enabled {
+                    return;
+                }
+                s.settings.mic_enabled = enabled;
+                ui.set_mic_enabled(enabled);
+                changed(&ui, &mut s);
+                if ui.get_running() {
+                    s.controls.mute.store(1, Ordering::Relaxed);
+                    s.feed = None;
+                    ui.set_running(false);
+                    ui.set_busy(true);
+                    ui.set_status("音声接続を再構成中…".into());
+                    if commands
+                        .send(Command::Start(Box::new(s.settings.clone())))
+                        .is_err()
+                    {
+                        ui.set_busy(false);
+                        ui.set_message("音声ワーカーに接続できません".into());
+                    }
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
         ui.on_mixer_changed(move |mic, value| {
             if !value.is_finite() {
                 return;
@@ -911,6 +945,8 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ui.invoke_bass_preset(true);assert!(ui.get_bass_mode());
         click(52.,180.);assert_eq!(ui.get_page(),1);
         ui.invoke_control_numeric(2,"-18 dB".into());assert_eq!(ui.get_mic_db(),-18.);
+        click(1050.,365.);assert!(!ui.get_mic_enabled(),"mixer switch must stop mic route");
+        assert_eq!(ui.get_mic_db(),-18.);
         ui.invoke_control_numeric(0,"-9 dB".into());assert_eq!(ui.get_output_db(),-9.);
         click(52.,126.);assert_eq!(ui.get_page(),0);
         ui.invoke_mixer_changed(true,-18.);assert_eq!(ui.get_mic_db(),-18.);
@@ -918,7 +954,8 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ui.set_mic_index(1);ui.set_mic_channel(1.);ui.invoke_audio_config_changed();
         ui.invoke_bass_changed(false);ui.invoke_preset_selected(3);assert!(ui.get_effects().row_data(5).unwrap().enabled);
         ui.set_output_index(1);ui.invoke_audio_config_changed();
-        ui.invoke_preset_action(0,"UI smoke tone".into());assert_eq!(Settings::load().unwrap().output_device,"windows:default");assert_eq!(Settings::load().unwrap().mic_device,"asio");assert_eq!(Settings::load().unwrap().mic_db,-18.);assert!(Settings::load().unwrap().presets.iter().any(|p|p.name=="UI smoke tone"));
+        ui.invoke_preset_action(0,"UI smoke tone".into());assert_eq!(Settings::load().unwrap().output_device,"windows:default");assert_eq!(Settings::load().unwrap().mic_device,"asio");assert_eq!(Settings::load().unwrap().mic_db,-18.);assert!(!Settings::load().unwrap().mic_enabled);assert!(Settings::load().unwrap().presets.iter().any(|p|p.name=="UI smoke tone"));
+        ui.invoke_mic_enabled_changed(true);assert!(ui.get_mic_enabled());assert_eq!(ui.get_mic_db(),-18.);
         ui.invoke_preset_action(2,"Renamed smoke tone".into());assert!(Settings::load().unwrap().presets.iter().any(|p|p.name=="Renamed smoke tone"));
         ui.invoke_preset_action(3,"".into());assert!(!Settings::load().unwrap().presets.iter().any(|p|p.name=="Renamed smoke tone"));
         ui.invoke_select_virtual_output();assert!(ui.get_virtual_output());
@@ -934,7 +971,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let saved=Settings::load().unwrap();assert!(!saved.dark);assert!(saved.guitar_tone.is_some());assert!(saved.bass_tone.is_some());
         ui.invoke_preset_action(3,"".into());
         ui.set_settings_open(false);ui.set_tuner_open(true);save_png("artifacts/ui-smoke-tuner.png",&ui.window().take_snapshot().unwrap()).unwrap();
-        std::fs::write("artifacts/ui-smoke.json",r#"{"passed":true,"checks":["pointer effect selection","pointer independent bypass","parameter edit","numeric edit","pointer mute","knob drag","knob keyboard","center numeric keyboard entry","scope source and timebase pointer controls","theme and instrument banks persist","collapsed amp level mapping","EQ expansion","Windows output selection persists","virtual output selection persists","bass monitor settings persist","factory preset","bass preset","mixer gain and microphone selection persistence","save and reload","rename and reload","delete and reload","dark light and tuner snapshots","instrument tabs preserve independent tones","sidebar mixer navigation","unit-aware output and mixer numeric edits"]}"#).unwrap();
+        std::fs::write("artifacts/ui-smoke.json",r#"{"passed":true,"checks":["pointer effect selection","pointer independent bypass","parameter edit","numeric edit","pointer mute","knob drag","knob keyboard","center numeric keyboard entry","scope source and timebase pointer controls","theme and instrument banks persist","collapsed amp level mapping","EQ expansion","Windows output selection persists","virtual output selection persists","bass monitor settings persist","factory preset","bass preset","mixer gain and microphone selection persistence","save and reload","rename and reload","delete and reload","dark light and tuner snapshots","instrument tabs preserve independent tones","sidebar mixer navigation","microphone processing switch and persistence","unit-aware output and mixer numeric edits"]}"#).unwrap();
         let _=slint::quit_event_loop();
     });
     }

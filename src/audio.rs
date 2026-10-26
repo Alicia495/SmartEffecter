@@ -531,13 +531,17 @@ impl Session {
         let (wave_tx, wave_rx) = RingBuffer::new(8192);
         let (tuner_tx, tuner_rx) = RingBuffer::new(8192);
         let metrics = Arc::new(Metrics::default());
-        if settings.mic_device == "asio"
+        if settings.mic_enabled
+            && settings.mic_device == "asio"
             && (settings.mic_channel >= input.channels() as usize
                 || settings.mic_channel == settings.input_channel)
         {
             return Err("マイクには楽器と異なる有効な入力チャンネルを選んでください".into());
         }
-        let microphone = if !settings.mic_device.is_empty() && settings.mic_device != "asio" {
+        let microphone = if settings.mic_enabled
+            && !settings.mic_device.is_empty()
+            && settings.mic_device != "asio"
+        {
             Some(Microphone::open(settings)?)
         } else {
             None
@@ -571,7 +575,8 @@ impl Session {
             monitor_metrics: monitor_metrics.clone(),
             monitor_gain: 0.,
             microphone,
-            mic_channel: (settings.mic_device == "asio").then_some(settings.mic_channel),
+            mic_channel: (settings.mic_enabled && settings.mic_device == "asio")
+                .then_some(settings.mic_channel),
             instrument_gain: 10f32.powf(settings.instrument_db / 20.),
             mic_gain: 0.,
             processor: Processor::new(settings.sample_rate as f32, settings.tone),
@@ -897,7 +902,6 @@ impl Capture {
             let raw = frame[self.selected].to_sample::<f32>();
             let (input, mut out) = self.processor.process(raw, bypass, mute);
             self.instrument_gain += (instrument_target - self.instrument_gain) * 0.004;
-            self.mic_gain += (mic_target - self.mic_gain) * 0.004;
             self.monitor_gain += (monitor_target - self.monitor_gain) * 0.004;
             // Oscilloscope taps instrument audio before the microphone mixer.
             self.point.low_in = input;
@@ -913,19 +917,29 @@ impl Capture {
                     metrics.overflow_frames.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            let mic = self
-                .mic_channel
-                .map(|c| frame[c].to_sample::<f32>())
-                .or_else(|| {
-                    self.microphone
-                        .as_ref()
-                        .and_then(|m| m.scratch.get(index).copied())
-                })
-                .unwrap_or(0.);
-            let mic = if mic.is_finite() { mic } else { 0. };
-            for sample in &mut out {
-                *sample = *sample * self.instrument_gain + mic * self.mic_gain;
-            }
+            let mic = if self.mic_channel.is_some() || self.microphone.is_some() {
+                self.mic_gain += (mic_target - self.mic_gain) * 0.004;
+                let mic = self
+                    .mic_channel
+                    .map(|c| frame[c].to_sample::<f32>())
+                    .or_else(|| {
+                        self.microphone
+                            .as_ref()
+                            .and_then(|m| m.scratch.get(index).copied())
+                    })
+                    .unwrap_or(0.);
+                let mic = if mic.is_finite() { mic } else { 0. };
+                for sample in &mut out {
+                    *sample = *sample * self.instrument_gain + mic * self.mic_gain;
+                }
+                mic
+            } else {
+                // Instrument-only route: no mic reads, gain smoothing, or mixing.
+                for sample in &mut out {
+                    *sample *= self.instrument_gain;
+                }
+                0.
+            };
             input_peak = input_peak.max(input.abs()).max(mic.abs());
             output_peak = output_peak.max(out[0].abs()).max(out[1].abs());
             if raw.abs() >= 0.999 || input.abs() >= 1. || mic.abs() >= 0.999 {
@@ -1163,6 +1177,10 @@ pub fn spawn_worker(
                     }
                 }
                 Command::Start(settings) => {
+                    if session.is_some() {
+                        controls.mute.store(1, Ordering::Relaxed);
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                     drop(session.take());
                     let opened = Session::open(&settings, controls.clone());
                     match opened {
@@ -1197,6 +1215,47 @@ pub fn spawn_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires an attached two-input ASIO interface; output is muted"]
+    fn microphone_route_restarts_on_hardware() {
+        let device = devices()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.inputs >= 2 && d.rates.contains(&48000))
+            .unwrap();
+        let settings = Settings {
+            device: device.name,
+            input_channel: 1,
+            buffer: 32,
+            ..Settings::default()
+        };
+        let controls = Arc::new(SharedControls::new(&settings.tone));
+        controls.mute.store(1, Ordering::Relaxed);
+        let (commands, events, worker) = spawn_worker(controls);
+        for (enabled, source, channel) in [
+            (false, "missing-microphone", 0),
+            (true, "asio", 0),
+            (false, "asio", 1),
+        ] {
+            let mut next = settings.clone();
+            next.mic_enabled = enabled;
+            next.mic_device = source.into();
+            next.mic_channel = channel;
+            commands.send(Command::Start(Box::new(next))).unwrap();
+            let event = events.recv_timeout(Duration::from_secs(10)).unwrap();
+            let Event::Started(result) = event else {
+                panic!("expected Started");
+            };
+            let (feed, _) = result.unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            let report = feed.metrics.report();
+            assert!(report.input_blocks > 0);
+            assert_eq!(report.errors, 0);
+            assert_eq!(report.mic_errors, 0);
+        }
+        commands.send(Command::Shutdown).unwrap();
+        worker.join().unwrap();
+    }
     #[test]
     fn microphone_discontinuity_does_not_mark_a_live_stream_as_failed() {
         let metrics = Metrics::default();
@@ -1428,6 +1487,10 @@ mod tests {
         });
         assert_eq!(allocations, 0);
         assert!(output.iter().all(|v| (*v - 0.2).abs() < 1e-5));
+        assert_eq!(
+            capture.mic_gain, 0.,
+            "inactive mic must skip gain processing"
+        );
         capture.mic_channel = Some(0);
         capture
             .controls
@@ -1462,6 +1525,30 @@ mod tests {
             (scope.high_out - 0.1).abs() < 1e-5,
             "scope must exclude the 0.225 microphone mix"
         );
+
+        capture.mic_channel = None;
+        let previous_gain = capture.mic_gain;
+        capture
+            .controls
+            .mic_gain
+            .store(1f32.to_bits(), Ordering::Relaxed);
+        let allocations = crate::allocation_check::count(|| {
+            capture.run(&input, cpal::StreamInstant::ZERO);
+            playback.run(&mut output, cpal::StreamInstant::ZERO);
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(
+            capture.mic_gain, previous_gain,
+            "inactive mixer must not process mic gain"
+        );
+        assert!(output.iter().all(|v| (*v - 0.1).abs() < 1e-5));
+        capture.mic_channel = Some(0);
+        capture
+            .controls
+            .mic_gain
+            .store(0.25f32.to_bits(), Ordering::Relaxed);
+        capture.run(&input, cpal::StreamInstant::ZERO);
+        playback.run(&mut output, cpal::StreamInstant::ZERO);
 
         capture.controls.mute.store(1, Ordering::Relaxed);
         capture.run(&input, cpal::StreamInstant::ZERO);
