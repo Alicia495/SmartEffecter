@@ -1,7 +1,10 @@
 #![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 mod app;
 mod audio;
+mod diagnostics;
 mod dsp;
+mod metronome;
+mod scope;
 mod state;
 slint::include_modules!();
 
@@ -135,6 +138,7 @@ fn entry() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(mic) = argument(&args, "--mic") {
             settings.mic_device = mic.to_owned();
         }
+        settings.mic_enabled = !args.iter().any(|a| a == "--no-mic");
         if let Some(channel) = argument(&args, "--mic-channel") {
             settings.mic_channel = channel.parse::<usize>()?.saturating_sub(1);
         }

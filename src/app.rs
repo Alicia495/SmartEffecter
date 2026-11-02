@@ -96,15 +96,23 @@ fn refresh_effect(ui: &AppWindow, state: &mut AppState) {
     ui.set_bass_mode(state.settings.tone.bass);
     ui.set_instrument_db(state.settings.instrument_db);
     ui.set_mic_db(state.settings.mic_db);
+    ui.set_mic_enabled(state.settings.mic_enabled);
+    ui.set_metronome_bpm(state.settings.metronome_bpm as f32);
+    ui.set_metronome_beats(state.settings.metronome_beats as f32);
+    ui.set_metronome_db(state.settings.metronome_db);
     ui.set_monitor_enabled(state.settings.monitor_enabled);
     ui.set_monitor_db(state.settings.monitor_db);
 }
 fn refresh_presets(ui: &AppWindow, state: &AppState) {
     ui.set_preset_names(strings(
-        ["現在の音色", "Clean", "Crunch", "Lead"]
-            .map(str::to_owned)
-            .into_iter()
-            .chain(state.settings.presets.iter().map(|p| p.name.clone())),
+        if state.settings.tone.bass {
+            ["現在の音色", "Bass Clean", "Bass Drive", "Bass Slap"]
+        } else {
+            ["現在の音色", "Clean", "Crunch", "Lead"]
+        }
+        .map(str::to_owned)
+        .into_iter()
+        .chain(state.settings.presets.iter().map(|p| p.name.clone())),
     ));
     ui.set_user_preset(ui.get_preset_index() >= 4);
 }
@@ -119,6 +127,18 @@ fn changed(ui: &AppWindow, state: &mut AppState) {
     );
     state.controls.monitor_gain.store(
         10f32.powf(state.settings.monitor_db / 20.).to_bits(),
+        Ordering::Relaxed,
+    );
+    state
+        .controls
+        .metronome_bpm
+        .store(state.settings.metronome_bpm, Ordering::Relaxed);
+    state
+        .controls
+        .metronome_beats
+        .store(state.settings.metronome_beats, Ordering::Relaxed);
+    state.controls.metronome_gain.store(
+        10f32.powf(state.settings.metronome_db / 20.).to_bits(),
         Ordering::Relaxed,
     );
     state.controls.publish(&state.settings.tone);
@@ -259,54 +279,21 @@ fn save_audio_selection(ui: &AppWindow, state: &mut AppState) {
         state.last_edit = Some(Instant::now());
     }
 }
-fn append_wave(history: &mut VecDeque<WavePoint>, point: WavePoint) {
-    if history
-        .back()
-        .is_some_and(|last| point.sequence != last.sequence + u64::from(point.frames))
-    {
-        // A dropped visual update is a gap, not adjacent audio. Start a fresh
-        // window rather than compressing the missing time into the waveform.
-        history.clear();
-    }
-    if history.len() >= 400 {
-        history.pop_front();
-    }
-    history.push_back(point);
-}
-fn waveform(history: &VecDeque<WavePoint>, input: bool, dark: bool) -> slint::Image {
-    let width = 1000usize;
-    let height = 100usize;
-    let mut buffer = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(width as u32, height as u32);
-    let bg = if dark { [20, 25, 28] } else { [238, 241, 242] };
-    let line = if dark { [139, 224, 189] } else { [38, 118, 88] };
-    let center = if dark { [53, 65, 72] } else { [203, 213, 217] };
-    let bytes = buffer.make_mut_bytes();
-    for px in bytes.as_chunks_mut::<3>().0 {
-        px.copy_from_slice(&bg);
-    }
-    for x in 0..width {
-        let base = (height / 2 * width + x) * 3;
-        bytes[base..base + 3].copy_from_slice(&center);
-    }
-    let offset = 400 - history.len();
-    for (i, point) in history.iter().enumerate() {
-        let (lo, hi) = if input {
-            (point.low_in, point.high_in)
+
+fn scope_image(ui: &AppWindow, state: &AppState) -> slint::Image {
+    let theme = ui.global::<crate::Theme>();
+    crate::scope::image(
+        &state.wave,
+        ui.get_wave_input(),
+        if ui.get_demo() {
+            48000
         } else {
-            (point.low_out, point.high_out)
-        };
-        let x = (offset + i) * width / 400;
-        let next = ((offset + i + 1) * width / 400).min(width);
-        let top = ((0.5 - hi.clamp(-1., 1.) * 0.46) * height as f32) as usize;
-        let bottom = ((0.5 - lo.clamp(-1., 1.) * 0.46) * height as f32) as usize;
-        for x in x..next.saturating_sub(1).max(x + 1) {
-            for y in top.min(height - 1)..=bottom.min(height - 1) {
-                let p = (y * width + x) * 3;
-                bytes[p..p + 3].copy_from_slice(&line);
-            }
-        }
-    }
-    slint::Image::from_rgb8(buffer)
+            state.settings.sample_rate
+        },
+        ui.get_scope_ms() as u32,
+        theme.get_accent(),
+        theme.get_scope_grid(),
+    )
 }
 
 pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -347,7 +334,20 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         settings.buffer = live_buffer;
     }
+    if args.iter().any(|a| a == "--bass") {
+        settings.switch_instrument(true);
+    }
     let controls = Arc::new(SharedControls::new(&settings.tone));
+    controls
+        .metronome_bpm
+        .store(settings.metronome_bpm, Ordering::Relaxed);
+    controls
+        .metronome_beats
+        .store(settings.metronome_beats, Ordering::Relaxed);
+    controls.metronome_gain.store(
+        10f32.powf(settings.metronome_db / 20.).to_bits(),
+        Ordering::Relaxed,
+    );
     let (commands, events, worker) = audio::spawn_worker(controls.clone());
     let ui = AppWindow::new()?;
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
@@ -357,7 +357,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     ui.set_output_names(strings(["同じ機器 · ASIO（低遅延）".into()]));
     ui.set_monitor_names(strings(["入力機器 · ASIO（低遅延）".into()]));
     if args.iter().any(|a| a == "--compact") {
-        ui.window().set_size(slint::LogicalSize::new(900., 740.));
+        ui.window().set_size(slint::LogicalSize::new(960., 760.));
     }
     if live_seconds.is_some() {
         ui.set_muted(true);
@@ -368,6 +368,12 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.iter().any(|a| a == "--settings") {
         ui.set_settings_open(true);
+    }
+    if args.iter().any(|a| a == "--mixer") {
+        ui.set_page(1);
+    }
+    if args.iter().any(|a| a == "--amp") {
+        ui.set_selected(3);
     }
     if args.iter().any(|a| a == "--eq") {
         ui.set_eq_open(true);
@@ -380,7 +386,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         monitor_outputs: vec![],
         inputs: vec![],
         feed: None,
-        wave: VecDeque::with_capacity(400),
+        wave: VecDeque::with_capacity(4096),
         tuner: VecDeque::with_capacity(2048),
         parameters: Rc::new(VecModel::default()),
         last_edit: None,
@@ -401,7 +407,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "同じASIO機器の別入力".into(),
     ]));
     refresh_presets(&ui, &state.borrow());
-    ui.set_waveform(waveform(&state.borrow().wave, false, ui.get_dark()));
+    ui.set_waveform(scope_image(&ui, &state.borrow()));
     if let Some(error) = load_error {
         ui.set_message(format!("設定を読み込めませんでした: {error}").into());
     }
@@ -422,6 +428,23 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
         }};
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_control_numeric(move |control, text| {
+            if let Some(ui) = weak.upgrade() {
+                match text.split_whitespace().next().unwrap_or("").parse::<f32>() {
+                    Ok(value) if value.is_finite() => match control {
+                        0 => ui.invoke_output_changed(value.clamp(-60., 0.)),
+                        1 => ui.invoke_mixer_changed(false, value),
+                        2 => ui.invoke_mixer_changed(true, value),
+                        3 => ui.invoke_monitor_changed(value),
+                        _ => (),
+                    },
+                    _ => ui.set_message("数値を入力してください".into()),
+                }
+            }
+        });
     }
     bind!(on_select_effect, |ui: &AppWindow,
                              s: &mut AppState,
@@ -494,16 +517,21 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     bind!(
         on_output_changed,
         |ui: &AppWindow, s: &mut AppState, value: f32| {
-            s.settings.tone.output_db = value.clamp(-60., 0.);
-            ui.set_output_db(value);
+            if !value.is_finite() {
+                return;
+            }
+            // Gain dials declare a 1 dB step and display round(value); store
+            // the stepped value so the applied gain matches the display.
+            s.settings.tone.output_db = value.clamp(-60., 0.).round();
+            ui.set_output_db(s.settings.tone.output_db);
             changed(ui, s);
         }
     );
     bind!(on_input_changed, |ui: &AppWindow,
                              s: &mut AppState,
                              value: f32| {
-        s.settings.tone.input_db = value.clamp(-24., 24.);
-        ui.set_input_db(value);
+        s.settings.tone.input_db = value.clamp(-24., 24.).round();
+        ui.set_input_db(s.settings.tone.input_db);
         changed(ui, s);
     });
     bind!(
@@ -512,7 +540,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if !value.is_finite() {
                 return;
             }
-            s.settings.monitor_db = value.clamp(-60., 6.);
+            s.settings.monitor_db = value.clamp(-60., 6.).round();
             ui.set_monitor_db(s.settings.monitor_db);
             changed(ui, s);
         }
@@ -520,17 +548,59 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     bind!(on_bass_changed, |ui: &AppWindow,
                             s: &mut AppState,
                             bass: bool| {
-        s.settings.tone.bass = bass;
+        if s.settings.tone.bass == bass {
+            return;
+        }
+        s.settings.switch_instrument(bass);
+        s.wave.clear();
+        ui.set_preset_index(0);
+        refresh_presets(ui, s);
+        refresh_effect(ui, s);
         changed(ui, s);
     });
     bind!(on_bass_preset, |ui: &AppWindow,
                            s: &mut AppState,
                            drive: bool| {
+        s.settings.switch_instrument(true);
         s.settings.tone = Tone::bass_factory(drive);
         ui.set_preset_index(0);
+        refresh_presets(ui, s);
         refresh_effect(ui, s);
         changed(ui, s);
     });
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let commands = commands.clone();
+        ui.on_mic_enabled_changed(move |enabled| {
+            if let Some(ui) = weak.upgrade() {
+                if ui.get_busy() {
+                    return;
+                }
+                let mut s = state.borrow_mut();
+                if s.settings.mic_enabled == enabled {
+                    return;
+                }
+                s.settings.mic_enabled = enabled;
+                ui.set_mic_enabled(enabled);
+                changed(&ui, &mut s);
+                if ui.get_running() {
+                    s.controls.mute.store(1, Ordering::Relaxed);
+                    s.feed = None;
+                    ui.set_running(false);
+                    ui.set_busy(true);
+                    ui.set_status("音声接続を再構成中…".into());
+                    if commands
+                        .send(Command::Start(Box::new(s.settings.clone())))
+                        .is_err()
+                    {
+                        ui.set_busy(false);
+                        ui.set_message("音声ワーカーに接続できません".into());
+                    }
+                }
+            }
+        });
+    }
     {
         let weak = ui.as_weak();
         let state = state.clone();
@@ -540,7 +610,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(ui) = weak.upgrade() {
                 let mut s = state.borrow_mut();
-                let value = value.clamp(-60., 6.);
+                let value = value.clamp(-60., 6.).round();
                 if mic {
                     s.settings.mic_db = value;
                     ui.set_mic_db(value);
@@ -583,16 +653,28 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                                s: &mut AppState,
                                i: i32| {
         if (1..=3).contains(&i) {
-            s.settings.tone = Tone::factory((i - 1) as usize);
+            s.settings.tone = if s.settings.tone.bass {
+                let mut tone = Tone::bass_factory(i == 2);
+                if i == 3 {
+                    tone.effects[3].params[1] = 3.;
+                    tone.effects[3].params[2] = -3.;
+                    tone.effects[3].params[3] = 4.;
+                }
+                tone
+            } else {
+                Tone::factory((i - 1) as usize)
+            };
         } else if i >= 4
-            && let Some(preset) = s.settings.presets.get((i - 4) as usize)
+            && let Some(preset) = s.settings.presets.get((i - 4) as usize).cloned()
         {
+            s.settings.switch_instrument(preset.tone.bass);
             s.settings.tone = preset.tone;
             ui.set_preset_name(preset.name.clone().into());
         }
         changed(ui, s);
         refresh_effect(ui, s);
         ui.set_dirty(false);
+        refresh_presets(ui, s);
         ui.set_user_preset(i >= 4);
     });
     {
@@ -754,6 +836,41 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_metronome_changed(move || {
+            if let Some(ui) = weak.upgrade() {
+                let mut s = state.borrow_mut();
+                s.settings.metronome_bpm = ui.get_metronome_bpm().round().clamp(30., 300.) as u32;
+                s.settings.metronome_beats = ui.get_metronome_beats().round().clamp(1., 12.) as u32;
+                s.settings.metronome_db = ui.get_metronome_db().clamp(-60., 0.);
+                s.controls
+                    .metronome_enabled
+                    .store(u32::from(ui.get_metronome_enabled()), Ordering::Relaxed);
+                changed(&ui, &mut s);
+                ui.set_metronome_bpm(s.settings.metronome_bpm as f32);
+                ui.set_metronome_beats(s.settings.metronome_beats as f32);
+                s.last_edit = Some(Instant::now());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_open_logs(move || {
+            let result = std::fs::create_dir_all(crate::diagnostics::directory()).and_then(|_| {
+                std::process::Command::new("explorer.exe")
+                    .arg(crate::diagnostics::directory())
+                    .spawn()
+                    .map(|_| ())
+            });
+            if let Err(e) = result
+                && let Some(ui) = weak.upgrade()
+            {
+                ui.set_message(format!("ログフォルダーを開けません: {e}").into());
+            }
+        });
+    }
     let timer = slint::Timer::default();
     let weak = ui.as_weak();
     let timer_state = state.clone();
@@ -764,6 +881,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut live_step = 0u64;
     timer.start(slint::TimerMode::Repeated,Duration::from_millis(33),move||{let Some(ui)=weak.upgrade()else{return;};let mut s=timer_state.borrow_mut();
         while let Ok(event)=events.try_recv(){match event{
+            Event::LogStatus(result)=>{match result { Ok(())=>ui.set_log_status("診断ログ: 自動記録中".into()), Err(e)=>{ui.set_log_status("診断ログ: 保存エラー".into());ui.set_message(e.into());} }}
             Event::Devices(result)=>{ui.set_busy(false);match result{Ok(devices)=>{s.devices=devices;ui.set_device_names(strings(s.devices.iter().map(|d|d.name.clone())));let index=s.devices.iter().position(|d|d.name==s.settings.device).or_else(||s.devices.iter().position(|d|d.name.contains("M-Track"))).unwrap_or(0);ui.set_device_index(index as i32);device_options(&ui,&s,index);if s.devices.is_empty(){ui.set_status("ASIO機器なし".into());ui.set_message("AG03MK2 / M-TrackのUSB接続と公式ASIOドライバーを確認してください".into());}else{ui.set_status("接続待ち".into());}},Err(e)=>{ui.set_status("ASIO確認エラー".into());ui.set_message(e.into());}}}
             Event::Inputs(result)=>{match result {
                 Ok(mut inputs)=>{
@@ -795,7 +913,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         if live_seconds.is_some()&&live_start.is_none()&&!ui.get_busy()&&!s.devices.is_empty(){let device=s.devices[ui.get_device_index() as usize].clone();s.settings.device=device.name;s.settings.buffer=live_buffer;ui.set_busy(true);let _=timer_commands.send(Command::Start(Box::new(s.settings.clone())));}
         timer_controls.mute.store(u32::from(ui.get_busy()||ui.get_muted()||(ui.get_tuner_open()&&ui.get_tuner_muted())),Ordering::Relaxed);timer_controls.bypass.store(u32::from(ui.get_bypassed()),Ordering::Relaxed);
         if let Some(mut feed)=s.feed.take(){
-            while let Ok(point)=feed.wave.pop(){append_wave(&mut s.wave,point);}
+            while let Ok(point)=feed.wave.pop(){crate::scope::append(&mut s.wave,point);}
             while let Ok(sample)=feed.tuner.pop(){if s.tuner.len()>=2048{s.tuner.pop_front();}s.tuner.push_back(sample);}
             let m=&feed.metrics;let input=f32::from_bits(m.input_peak.swap(0,Ordering::Relaxed));let output=f32::from_bits(m.output_peak.swap(0,Ordering::Relaxed));
             ui.set_input_level(input.max(ui.get_input_level()*0.85));ui.set_output_level(output.max(ui.get_output_level()*0.85));
@@ -803,9 +921,9 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let report=m.report();ui.set_latency(format!("{:.2} ms",report.estimated_round_trip_ms).into());ui.set_diagnostics(format!("実バッファ {} samples · 処理最大 {} µs\n入出力欠落 {} / {} frames · 期限超過 {} · エラー {}\nマイク: 待ち {:.1} ms · 欠落 {} / {} frames · 一時欠落 {} · エラー {}",report.callback_frames,report.max_process_us,report.missing_frames,report.overflow_frames,report.deadline_misses,report.errors,report.mic_queue_ms,report.mic_missing_frames,report.mic_overflow_frames,report.mic_discontinuities,report.mic_errors).into());
             if let Some(monitor) = &feed.monitor_metrics {
                 let monitor = monitor.report();
-                ui.set_diagnostics(format!("{}\nベースモニター: 推定 {:.2} ms · 欠落 {} / {} frames · エラー {}",ui.get_diagnostics(),report.driver_input_ms + monitor.driver_output_ms + monitor.callback_queue_ms,monitor.missing_frames,monitor.overflow_frames,monitor.errors).into());
+                ui.set_diagnostics(format!("{}\n楽器モニター: 推定 {:.2} ms · 欠落 {} / {} frames · エラー {}",ui.get_diagnostics(),report.driver_input_ms + monitor.driver_output_ms + monitor.callback_queue_ms,monitor.missing_frames,monitor.overflow_frames,monitor.errors).into());
                 if monitor.errors > 0 && !ui.get_busy() {
-                    ui.set_message("ベースモニター出力でエラーが発生しました。接続を確認して再接続してください。".into());
+                    ui.set_message("楽器モニター出力でエラーが発生しました。接続を確認して再接続してください。".into());
                 }
             }
             if report.mic_errors > 0 && !ui.get_busy() {
@@ -827,9 +945,16 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         if demo {
             let tone=s.settings.tone;let mut processor=s.demo_processor.take().unwrap();processor.set_tone(tone);
-            for _ in 0..7{let mut point=WavePoint::default();for _ in 0..240{let n=s.demo_sample;let t=n as f32/48000.;let envelope=(-(t%0.62)*6.).exp();let input=((std::f32::consts::TAU*110.*t).sin()+0.3*(std::f32::consts::TAU*220.*t).sin())*0.22*envelope;let(input,out)=processor.process(input,ui.get_bypassed(),ui.get_muted());point.low_in=point.low_in.min(input);point.high_in=point.high_in.max(input);point.low_out=point.low_out.min(out[0]).min(out[1]);point.high_out=point.high_out.max(out[0]).max(out[1]);s.demo_sample+=1;}point.sequence=s.demo_sample;point.frames=240;append_wave(&mut s.wave,point);}s.demo_processor=Some(processor);
+            for _ in 0..1680 {
+                let t=s.demo_sample as f32/48000.;
+                let input=((std::f32::consts::TAU*110.*t).sin()+0.3*(std::f32::consts::TAU*220.*t).sin())*0.5;
+                let(input,out)=processor.process(input,ui.get_bypassed(),ui.get_muted());
+                s.demo_sample+=1;
+                let sequence=s.demo_sample; if sequence.is_multiple_of(4) { crate::scope::append(&mut s.wave,WavePoint {low_in:input,high_in:input,low_out:(out[0]+out[1])*0.5,high_out:(out[0]+out[1])*0.5,sequence,frames:4}); }
+            }
+            s.demo_processor=Some(processor);
         }
-        if ui.get_waveform_enabled()&&!ui.window().is_minimized(){ui.set_waveform(waveform(&s.wave,ui.get_wave_input(),ui.get_dark()));}
+        if ui.get_waveform_enabled()&&!ui.window().is_minimized(){ui.set_waveform(scope_image(&ui, &s));}
         if !demo&&live_seconds.is_none()&&s.last_edit.is_some_and(|time|time.elapsed()>Duration::from_millis(800)){if let Err(e)=s.settings.save(){ui.set_message(format!("設定の保存に失敗: {e}").into());}s.last_edit=None;}
     });
     let smoke_timer = slint::Timer::default();
@@ -845,12 +970,17 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         smoke_timer.start(slint::TimerMode::SingleShot,Duration::from_millis(1500),move||{
         let ui=weak.upgrade().unwrap();
         let click=|x,y|{let position=slint::LogicalPosition::new(x,y);ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed{position,button:slint::platform::PointerEventButton::Left});ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased{position,button:slint::platform::PointerEventButton::Left});};
-        click(406.,302.);assert_eq!(ui.get_selected(),2,"effect selection must work by pointer");
-        let before=ui.get_effects().row_data(2).unwrap().enabled;click(406.,334.);assert_ne!(ui.get_effects().row_data(2).unwrap().enabled,before,"on/off must be separate from selection");
+        click(1106.,116.);assert_eq!(ui.get_scope_ms(),80);ui.set_scope_ms(40);
+        click(983.,116.);assert!(ui.get_wave_input());click(1040.,116.);assert!(!ui.get_wave_input());
+        click(180.,351.);assert_eq!(ui.get_selected(),0);click(475.,351.);assert_eq!(ui.get_selected(),2,"effect selection must work by pointer");
+        let before=ui.get_effects().row_data(2).unwrap().enabled;click(475.,383.);assert_ne!(ui.get_effects().row_data(2).unwrap().enabled,before,"on/off must be separate from selection");
+        ui.set_metronome_enabled(true);ui.set_metronome_bpm(97.);ui.set_metronome_beats(3.);ui.set_metronome_db(-24.);ui.invoke_metronome_changed();
+        assert_eq!(ui.get_metronome_bpm(),97.);assert_eq!(ui.get_metronome_beats(),3.);
+        ui.set_metronome_enabled(false);ui.invoke_metronome_changed();
         // Exercise the native pointer/key path, not only callback invocation.
         ui.invoke_param_edited(0,40.);
-        let start=slint::LogicalPosition::new(416.,550.);
-        let end=slint::LogicalPosition::new(416.,514.);
+        let start=slint::LogicalPosition::new(409.,596.);
+        let end=slint::LogicalPosition::new(409.,560.);
         ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed{position:start,button:slint::platform::PointerEventButton::Left});
         ui.window().dispatch_event(slint::platform::WindowEvent::PointerMoved{position:end});
         ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased{position:end,button:slint::platform::PointerEventButton::Left});
@@ -859,9 +989,12 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ui.window().dispatch_event(slint::platform::WindowEvent::KeyPressed{text:slint::platform::Key::UpArrow.into()});
         ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased{text:slint::platform::Key::UpArrow.into()});
         assert_eq!(ui.get_parameters().row_data(0).unwrap().value,dragged+1.,"focused knob keyboard adjustment");
+        let key=|text:slint::SharedString|{ui.window().dispatch_event(slint::platform::WindowEvent::KeyPressed{text:text.clone()});ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased{text});};
+        key(slint::platform::Key::Return.into());key("5".into());key("0".into());key(slint::platform::Key::Return.into());
+        assert_eq!(ui.get_parameters().row_data(0).unwrap().value,50.,"center numeric entry through keyboard must apply");
         ui.invoke_param_edited(0,73.);assert_eq!(ui.get_parameters().row_data(0).unwrap().value,73.);
         ui.invoke_param_numeric(1,"42 %".into());assert_eq!(ui.get_parameters().row_data(1).unwrap().value,42.);
-        click(984.,52.);assert!(ui.get_muted(),"mute button must respond");click(984.,52.);assert!(!ui.get_muted());
+        click(1109.,709.);assert!(ui.get_muted(),"mute button must respond");click(1109.,709.);assert!(!ui.get_muted());
         ui.invoke_select_effect(3);
         assert_eq!(ui.get_parameters().row_count(),2);
         ui.invoke_param_numeric(4,"-9 dB".into());
@@ -870,13 +1003,25 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(ui.get_parameters().row_count(),5);
         assert_eq!(ui.get_parameters().row_data(4).unwrap().value,-9.);
         ui.set_eq_open(false);ui.invoke_eq_changed();
+        ui.invoke_select_effect(2);ui.invoke_param_edited(0,67.);
+        click(365.,45.);assert!(ui.get_bass_mode());
+        ui.invoke_param_edited(0,21.);
+        click(277.,45.);assert!(!ui.get_bass_mode());assert_eq!(ui.get_parameters().row_data(0).unwrap().value,67.);
+        click(365.,45.);assert!(ui.get_bass_mode());assert_eq!(ui.get_parameters().row_data(0).unwrap().value,21.);
         ui.invoke_bass_preset(true);assert!(ui.get_bass_mode());
+        click(52.,180.);assert_eq!(ui.get_page(),1);
+        ui.invoke_control_numeric(2,"-18 dB".into());assert_eq!(ui.get_mic_db(),-18.);
+        click(1050.,365.);assert!(!ui.get_mic_enabled(),"mixer switch must stop mic route");
+        assert_eq!(ui.get_mic_db(),-18.);
+        ui.invoke_control_numeric(0,"-9 dB".into());assert_eq!(ui.get_output_db(),-9.);
+        click(52.,126.);assert_eq!(ui.get_page(),0);
         ui.invoke_mixer_changed(true,-18.);assert_eq!(ui.get_mic_db(),-18.);
         ui.invoke_mixer_changed(false,-6.);assert_eq!(ui.get_instrument_db(),-6.);
         ui.set_mic_index(1);ui.set_mic_channel(1.);ui.invoke_audio_config_changed();
-        ui.invoke_preset_selected(3);assert!(ui.get_effects().row_data(5).unwrap().enabled);
+        ui.invoke_bass_changed(false);ui.invoke_preset_selected(3);assert!(ui.get_effects().row_data(5).unwrap().enabled);
         ui.set_output_index(1);ui.invoke_audio_config_changed();
-        ui.invoke_preset_action(0,"UI smoke tone".into());assert_eq!(Settings::load().unwrap().output_device,"windows:default");assert_eq!(Settings::load().unwrap().mic_device,"asio");assert_eq!(Settings::load().unwrap().mic_db,-18.);assert!(Settings::load().unwrap().presets.iter().any(|p|p.name=="UI smoke tone"));
+        ui.invoke_preset_action(0,"UI smoke tone".into());assert_eq!(Settings::load().unwrap().output_device,"windows:default");assert_eq!(Settings::load().unwrap().mic_device,"asio");assert_eq!(Settings::load().unwrap().mic_db,-18.);assert!(!Settings::load().unwrap().mic_enabled);assert!(Settings::load().unwrap().presets.iter().any(|p|p.name=="UI smoke tone"));
+        ui.invoke_mic_enabled_changed(true);assert!(ui.get_mic_enabled());assert_eq!(ui.get_mic_db(),-18.);
         ui.invoke_preset_action(2,"Renamed smoke tone".into());assert!(Settings::load().unwrap().presets.iter().any(|p|p.name=="Renamed smoke tone"));
         ui.invoke_preset_action(3,"".into());assert!(!Settings::load().unwrap().presets.iter().any(|p|p.name=="Renamed smoke tone"));
         ui.invoke_select_virtual_output();assert!(ui.get_virtual_output());
@@ -886,10 +1031,16 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(Settings::load().unwrap().output_device,audio::VIRTUAL_OUTPUT);
         assert_eq!(Settings::load().unwrap().monitor_device,"windows:default");assert!(Settings::load().unwrap().monitor_enabled);assert_eq!(Settings::load().unwrap().monitor_db,-9.);
         ui.invoke_preset_action(3,"".into());
+        assert_eq!(Settings::load().unwrap().metronome_bpm,97);
+        assert_eq!(Settings::load().unwrap().metronome_beats,3);
+        ui.set_settings_open(false);ui.set_page(1);save_png("artifacts/ui-smoke-metronome.png",&ui.window().take_snapshot().unwrap()).unwrap();ui.set_page(0);
         ui.set_message("".into());ui.set_settings_open(false);ui.set_dark(true);save_png("artifacts/ui-smoke-dark.png",&ui.window().take_snapshot().unwrap()).unwrap();
-        ui.set_dark(false);ui.set_settings_open(true);save_png("artifacts/ui-smoke-settings-light.png",&ui.window().take_snapshot().unwrap()).unwrap();
+        ui.set_dark(false);ui.invoke_theme_changed(false);save_png("artifacts/ui-smoke-light.png",&ui.window().take_snapshot().unwrap()).unwrap();ui.set_settings_open(true);save_png("artifacts/ui-smoke-settings-light.png",&ui.window().take_snapshot().unwrap()).unwrap();
+        ui.set_settings_open(false);ui.invoke_preset_action(0,"Theme persistence smoke".into());
+        let saved=Settings::load().unwrap();assert!(!saved.dark);assert!(saved.guitar_tone.is_some());assert!(saved.bass_tone.is_some());
+        ui.invoke_preset_action(3,"".into());
         ui.set_settings_open(false);ui.set_tuner_open(true);save_png("artifacts/ui-smoke-tuner.png",&ui.window().take_snapshot().unwrap()).unwrap();
-        std::fs::write("artifacts/ui-smoke.json",r#"{"passed":true,"checks":["pointer effect selection","pointer independent bypass","parameter edit","numeric edit","pointer mute","knob drag","knob keyboard","collapsed amp level mapping","EQ expansion","Windows output selection persists","virtual output selection persists","bass monitor settings persist","factory preset","bass preset","mixer gain and microphone selection persistence","save and reload","rename and reload","delete and reload","dark light and tuner snapshots"]}"#).unwrap();
+        std::fs::write("artifacts/ui-smoke.json",r#"{"passed":true,"checks":["pointer effect selection","pointer independent bypass","parameter edit","numeric edit","pointer mute","knob drag","knob keyboard","center numeric keyboard entry","scope source and timebase pointer controls","theme and instrument banks persist","collapsed amp level mapping","EQ expansion","Windows output selection persists","virtual output selection persists","bass monitor settings persist","factory preset","bass preset","mixer gain and microphone selection persistence","save and reload","rename and reload","delete and reload","dark light and tuner snapshots","instrument tabs preserve independent tones","sidebar mixer navigation","microphone processing switch and persistence","unit-aware output and mixer numeric edits","metronome BPM beats volume and persistence"]}"#).unwrap();
         let _=slint::quit_event_loop();
     });
     }

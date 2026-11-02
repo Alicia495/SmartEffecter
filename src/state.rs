@@ -202,6 +202,9 @@ pub struct Preset {
 pub struct Settings {
     pub schema: u32,
     pub tone: Tone,
+    /// Inactive instrument's working tone. Optional for v1 settings migration.
+    pub guitar_tone: Option<Tone>,
+    pub bass_tone: Option<Tone>,
     pub device: String,
     /// Empty uses ASIO; virtual:vb-cable resolves VB-CABLE; otherwise a WASAPI endpoint ID.
     pub output_device: String,
@@ -210,6 +213,7 @@ pub struct Settings {
     pub input_channel: usize,
     /// Empty disables, "asio" uses another channel, otherwise a WASAPI ID.
     pub mic_device: String,
+    pub mic_enabled: bool,
     pub mic_channel: usize,
     pub instrument_db: f32,
     pub mic_db: f32,
@@ -220,18 +224,24 @@ pub struct Settings {
     pub presets: Vec<Preset>,
     pub waveform: bool,
     pub dark: bool,
+    pub metronome_bpm: u32,
+    pub metronome_beats: u32,
+    pub metronome_db: f32,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             schema: 1,
             tone: Tone::default(),
+            guitar_tone: None,
+            bass_tone: None,
             device: String::new(),
             output_device: String::new(),
             sample_rate: 48000,
             buffer: 32,
             input_channel: 1,
             mic_device: String::new(),
+            mic_enabled: true,
             mic_channel: 0,
             instrument_db: 0.,
             mic_db: -12.,
@@ -241,6 +251,9 @@ impl Default for Settings {
             presets: vec![],
             waveform: true,
             dark: true,
+            metronome_bpm: 120,
+            metronome_beats: 4,
+            metronome_db: -18.,
         }
     }
 }
@@ -255,6 +268,22 @@ pub fn data_dir() -> PathBuf {
         })
 }
 impl Settings {
+    pub fn switch_instrument(&mut self, bass: bool) {
+        if self.tone.bass == bass {
+            return;
+        }
+        if self.tone.bass {
+            self.bass_tone = Some(self.tone);
+        } else {
+            self.guitar_tone = Some(self.tone);
+        }
+        self.tone = if bass {
+            self.bass_tone.unwrap_or_else(|| Tone::bass_factory(false))
+        } else {
+            self.guitar_tone.unwrap_or_default()
+        };
+        self.tone.bass = bass;
+    }
     pub fn backup_unreadable() -> Result<PathBuf, String> {
         let source = data_dir().join("settings.json");
         let stamp = std::time::SystemTime::now()
@@ -277,6 +306,12 @@ impl Settings {
             return Err("設定ファイルのバージョンが未対応です".into());
         }
         settings.tone.sanitize();
+        for tone in [&mut settings.guitar_tone, &mut settings.bass_tone]
+            .into_iter()
+            .flatten()
+        {
+            tone.sanitize();
+        }
         settings.sample_rate = if matches!(settings.sample_rate, 44100 | 48000) {
             settings.sample_rate
         } else {
@@ -296,6 +331,13 @@ impl Settings {
                 -12.
             };
         }
+        settings.metronome_bpm = settings.metronome_bpm.clamp(30, 300);
+        settings.metronome_beats = settings.metronome_beats.clamp(1, 12);
+        settings.metronome_db = if settings.metronome_db.is_finite() {
+            settings.metronome_db.clamp(-60., 0.)
+        } else {
+            -18.
+        };
         settings.presets.truncate(128);
         for preset in &mut settings.presets {
             preset.tone.sanitize();
@@ -324,6 +366,10 @@ pub struct SharedControls {
     pub instrument_gain: AtomicU32,
     pub mic_gain: AtomicU32,
     pub monitor_gain: AtomicU32,
+    pub metronome_enabled: AtomicU32,
+    pub metronome_bpm: AtomicU32,
+    pub metronome_beats: AtomicU32,
+    pub metronome_gain: AtomicU32,
     pub mute: AtomicU32,
     pub bypass: AtomicU32,
 }
@@ -335,6 +381,10 @@ impl SharedControls {
             instrument_gain: AtomicU32::new(1f32.to_bits()),
             mic_gain: AtomicU32::new(0.25118864f32.to_bits()),
             monitor_gain: AtomicU32::new(0.5011872f32.to_bits()),
+            metronome_enabled: AtomicU32::new(0),
+            metronome_bpm: AtomicU32::new(120),
+            metronome_beats: AtomicU32::new(4),
+            metronome_gain: AtomicU32::new(0.12589254f32.to_bits()),
             mute: AtomicU32::new(0),
             bypass: AtomicU32::new(0),
         };
@@ -386,9 +436,39 @@ impl SharedControls {
 mod tests {
     use super::*;
     #[test]
+    fn microphone_switch_persists_without_losing_route_or_level() {
+        let settings = Settings {
+            mic_enabled: false,
+            mic_device: "asio".into(),
+            mic_db: -18.,
+            ..Settings::default()
+        };
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(!restored.mic_enabled);
+        assert_eq!(restored.mic_device, "asio");
+        assert_eq!(restored.mic_db, -18.);
+    }
+    #[test]
+    fn instrument_banks_survive_switch_and_serialization() {
+        let mut s = Settings::default();
+        s.tone.effects[2].params[0] = 77.;
+        s.switch_instrument(true);
+        assert!(s.tone.bass);
+        s.tone.effects[2].params[0] = 19.;
+        s.switch_instrument(false);
+        assert_eq!(s.tone.effects[2].params[0], 77.);
+        let mut copy: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        copy.switch_instrument(true);
+        assert_eq!(copy.tone.effects[2].params[0], 19.);
+    }
+    #[test]
     fn older_settings_without_mixer_or_bass_still_load() {
         let mut json = serde_json::to_value(Settings::default()).unwrap();
         for key in [
+            "mic_enabled",
+            "guitar_tone",
+            "bass_tone",
             "mic_device",
             "mic_channel",
             "mic_db",
@@ -403,6 +483,7 @@ mod tests {
         let settings: Settings = serde_json::from_value(json).unwrap();
         assert!(!settings.tone.bass);
         assert!(settings.mic_device.is_empty());
+        assert!(settings.mic_enabled);
         assert_eq!(settings.instrument_db, 0.);
         assert!(settings.monitor_device.is_empty());
     }

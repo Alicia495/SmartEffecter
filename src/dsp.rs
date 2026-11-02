@@ -10,13 +10,32 @@ fn pole(hz: f32, rate: f32) -> f32 {
 fn mix(a: f32, b: f32, amount: f32) -> f32 {
     a + (b - a) * amount
 }
+// Recursive states (one-pole filters, feedback delays, envelopes) decay
+// exponentially and would otherwise spend seconds in the subnormal range,
+// where f32 arithmetic takes a slow path on x86 and can stall a small
+// callback buffer. -300 dB is far below audibility, so flushing there is
+// inaudible and keeps every decay tail on the fast path.
+fn flush_denormal(value: f32) -> f32 {
+    if value.abs() < 1e-15 { 0. } else { value }
+}
+// Transparent below the knee; above it a tanh segment approaches +-1
+// asymptotically, so hot signals saturate instead of flat-topping.
+pub fn soft_clip(value: f32) -> f32 {
+    const KNEE: f32 = 0.9;
+    let magnitude = value.abs();
+    if magnitude <= KNEE {
+        value
+    } else {
+        value.signum() * (KNEE + (1. - KNEE) * ((magnitude - KNEE) / (1. - KNEE)).tanh())
+    }
+}
 #[derive(Default)]
 struct LowPass {
     state: f32,
 }
 impl LowPass {
     fn run(&mut self, value: f32, alpha: f32) -> f32 {
-        self.state += alpha * (value - self.state);
+        self.state = flush_denormal(self.state + alpha * (value - self.state));
         self.state
     }
 }
@@ -99,7 +118,7 @@ impl DelayLine {
         mix(self.samples[newer], self.samples[older], fraction)
     }
     fn push(&mut self, value: f32) {
-        self.samples[self.head] = value;
+        self.samples[self.head] = flush_denormal(value);
         self.head = (self.head + 1) % self.samples.len();
     }
 }
@@ -119,7 +138,7 @@ impl Comb {
     }
     fn run(&mut self, input: f32, feedback: f32, damp: f32) -> f32 {
         let old = self.delay.read(self.length);
-        self.damping += damp * (old - self.damping);
+        self.damping = flush_denormal(self.damping + damp * (old - self.damping));
         self.delay.push(input + self.damping * feedback);
         old
     }
@@ -158,6 +177,14 @@ pub struct Processor {
     threshold: f32,
     gate_release: f32,
     comp_attack: f32,
+    comp_release: f32,
+    comp_amount: f32,
+    comp_level: f32,
+    bass_pole: f32,
+    amp_low_pole: f32,
+    amp_mid_pole: f32,
+    amp_dc_pole: f32,
+    cab_pole: f32,
     drive_gain: f32,
     drive_tone: f32,
     drive_level: f32,
@@ -206,6 +233,14 @@ impl Processor {
             threshold: 0.,
             gate_release: 0.,
             comp_attack: 0.,
+            comp_release: 0.,
+            comp_amount: 0.,
+            comp_level: 1.,
+            bass_pole: 0.,
+            amp_low_pole: 0.,
+            amp_mid_pole: 0.,
+            amp_dc_pole: 0.,
+            cab_pole: 0.,
             drive_gain: 1.,
             drive_tone: 0.,
             drive_level: 1.,
@@ -228,6 +263,17 @@ impl Processor {
         self.threshold = db(self.current.effects[0].params[0]);
         self.gate_release = (-1. / (self.rate * self.current.effects[0].params[1] / 1000.)).exp();
         self.comp_attack = (-1. / (self.rate * self.current.effects[1].params[1] / 1000.)).exp();
+        self.comp_release = (-1. / (self.rate * 0.08)).exp();
+        self.comp_amount = self.current.effects[1].params[0] / 100.;
+        self.comp_level = db(self.current.effects[1].params[2]);
+        // Filter poles depend only on the rate and the instrument, so they are
+        // computed here instead of with an exp() per sample in process().
+        self.bass_pole = pole(180., self.rate);
+        let bass = self.target.bass;
+        self.amp_low_pole = pole(if bass { 120. } else { 220. }, self.rate);
+        self.amp_mid_pole = pole(if bass { 900. } else { 1800. }, self.rate);
+        self.amp_dc_pole = pole(if bass { 25. } else { 70. }, self.rate);
+        self.cab_pole = pole(4800., self.rate);
         self.drive_gain = 1. + self.current.effects[2].params[0] * 0.3;
         self.drive_tone = pole(700. + self.current.effects[2].params[1] * 65., self.rate);
         self.drive_level = db(self.current.effects[2].params[2]);
@@ -237,18 +283,21 @@ impl Processor {
     }
     /// Returns input after trim, then stereo output. No allocation, lock, or UI work.
     pub fn process(&mut self, raw: f32, bypass: bool, mute: bool) -> (f32, [f32; 2]) {
-        if self.tick & 31 == 0 {
+        // Shorter steps at the same ~8 ms time constant: updating every 32
+        // samples made the gains and filter coefficients staircase while a
+        // control was dragged, which is audible as zipper noise.
+        if self.tick & 7 == 0 {
             for i in 0..7 {
                 for j in 0..6 {
                     self.current.effects[i].params[j] = mix(
                         self.current.effects[i].params[j],
                         self.target.effects[i].params[j],
-                        0.08,
+                        0.021,
                     );
                 }
             }
-            self.current.input_db = mix(self.current.input_db, self.target.input_db, 0.08);
-            self.current.output_db = mix(self.current.output_db, self.target.output_db, 0.08);
+            self.current.input_db = mix(self.current.input_db, self.target.input_db, 0.021);
+            self.current.output_db = mix(self.current.output_db, self.target.output_db, 0.021);
             self.coefficients();
         }
         self.tick = self.tick.wrapping_add(1);
@@ -266,17 +315,17 @@ impl Processor {
             0.
         };
         let mut x = input;
-        self.gate_envelope = if x.abs() > self.gate_envelope {
+        self.gate_envelope = flush_denormal(if x.abs() > self.gate_envelope {
             mix(self.gate_envelope, x.abs(), 0.15)
         } else {
             mix(x.abs(), self.gate_envelope, self.gate_release)
-        };
+        });
         let gate_target = if self.gate_envelope > self.threshold {
             1.
         } else {
             0.
         };
-        self.gate_gain = mix(
+        self.gate_gain = flush_denormal(mix(
             self.gate_gain,
             gate_target,
             if gate_target > 0. {
@@ -284,26 +333,21 @@ impl Processor {
             } else {
                 1. - self.gate_release
             },
-        );
+        ));
         x = mix(x, x * self.gate_gain, self.wet[0]);
         let attack = if x.abs() > self.comp_envelope {
             self.comp_attack
         } else {
-            (-1. / (self.rate * 0.08)).exp()
+            self.comp_release
         };
-        self.comp_envelope = mix(x.abs(), self.comp_envelope, attack);
-        let amount = self.current.effects[1].params[0] / 100.;
+        self.comp_envelope = flush_denormal(mix(x.abs(), self.comp_envelope, attack));
         let compression = if self.comp_envelope > 0.12 {
-            (self.comp_envelope / 0.12).powf(-(0.85 * amount))
+            (self.comp_envelope / 0.12).powf(-(0.85 * self.comp_amount))
         } else {
             1.
         };
-        x = mix(
-            x,
-            x * compression * db(self.current.effects[1].params[2]),
-            self.wet[1],
-        );
-        let bass_low = self.bass_low.run(x, pole(180., self.rate));
+        x = mix(x, x * compression * self.comp_level, self.wet[1]);
+        let bass_low = self.bass_low.run(x, self.bass_pole);
         // Keep clean bass fundamentals out of the nonlinear branch so chord
         // fundamentals do not modulate every upper harmonic.
         let drive_input = if self.target.bass { x - bass_low } else { x };
@@ -317,26 +361,16 @@ impl Processor {
             driven
         };
         x = mix(x, driven, self.wet[2]);
-        let low = self.amp_low.run(
-            x,
-            pole(if self.target.bass { 120. } else { 220. }, self.rate),
-        );
-        let low_mid = self.amp_mid.run(
-            x,
-            pole(if self.target.bass { 900. } else { 1800. }, self.rate),
-        );
+        let low = self.amp_low.run(x, self.amp_low_pole);
+        let low_mid = self.amp_mid.run(x, self.amp_mid_pole);
         let eq = low * self.amp_eq[0]
             + (low_mid - low) * self.amp_eq[1]
             + (x - low_mid) * self.amp_eq[2];
         let pre = eq * self.amp_gain;
         let amp = self.amp_shaper.run(pre, self.mode[3], true);
-        let amp = amp
-            - self.amp_dc.run(
-                amp,
-                pole(if self.target.bass { 25. } else { 70. }, self.rate),
-            );
-        let amp = self.cab1.run(amp, pole(4800., self.rate));
-        let amp = self.cab2.run(amp, pole(4800., self.rate)) * self.amp_level;
+        let amp = amp - self.amp_dc.run(amp, self.amp_dc_pole);
+        let amp = self.cab1.run(amp, self.cab_pole);
+        let amp = self.cab2.run(amp, self.cab_pole) * self.amp_level;
         x = mix(x, amp, self.wet[3]);
         self.phase = (self.phase + TAU * self.current.effects[4].params[0] / self.rate) % TAU;
         let depth = self.current.effects[4].params[1] * 0.00007 * self.rate;
@@ -378,6 +412,7 @@ impl Processor {
             if !sample.is_finite() {
                 *sample = 0.;
             }
+            *sample = soft_clip(*sample);
         }
         (input, stereo)
     }
@@ -409,16 +444,24 @@ pub fn pitch(samples: &[f32], rate: f32) -> Option<(String, f32, f32)> {
         }
         2. * sum / norm.max(1e-12)
     };
+    if max < min + 2 {
+        return None;
+    }
+    // Carry score(lag - 1) over from the previous iteration instead of
+    // recomputing that O(n) autocorrelation for every candidate lag. The
+    // comparisons see the same values, so the result is unchanged.
     let mut best = (0, 0f32);
+    let mut previous = score(min);
     for lag in min + 1..max {
         let s = score(lag);
-        if s > 0.82 && s > score(lag - 1) && s >= score(lag + 1) {
+        if s > 0.82 && s > previous && s >= score(lag + 1) {
             best = (lag, s);
             break;
         }
         if s > best.1 {
             best = (lag, s);
         }
+        previous = s;
     }
     if best.0 == 0 || best.1 < 0.82 {
         return None;
