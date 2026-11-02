@@ -224,6 +224,9 @@ pub struct Settings {
     pub presets: Vec<Preset>,
     pub waveform: bool,
     pub dark: bool,
+    pub metronome_bpm: u32,
+    pub metronome_beats: u32,
+    pub metronome_db: f32,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -248,6 +251,9 @@ impl Default for Settings {
             presets: vec![],
             waveform: true,
             dark: true,
+            metronome_bpm: 120,
+            metronome_beats: 4,
+            metronome_db: -18.,
         }
     }
 }
@@ -325,6 +331,13 @@ impl Settings {
                 -12.
             };
         }
+        settings.metronome_bpm = settings.metronome_bpm.clamp(30, 300);
+        settings.metronome_beats = settings.metronome_beats.clamp(1, 12);
+        settings.metronome_db = if settings.metronome_db.is_finite() {
+            settings.metronome_db.clamp(-60., 0.)
+        } else {
+            -18.
+        };
         settings.presets.truncate(128);
         for preset in &mut settings.presets {
             preset.tone.sanitize();
@@ -353,6 +366,10 @@ pub struct SharedControls {
     pub instrument_gain: AtomicU32,
     pub mic_gain: AtomicU32,
     pub monitor_gain: AtomicU32,
+    pub metronome_enabled: AtomicU32,
+    pub metronome_bpm: AtomicU32,
+    pub metronome_beats: AtomicU32,
+    pub metronome_gain: AtomicU32,
     pub mute: AtomicU32,
     pub bypass: AtomicU32,
 }
@@ -364,6 +381,10 @@ impl SharedControls {
             instrument_gain: AtomicU32::new(1f32.to_bits()),
             mic_gain: AtomicU32::new(0.25118864f32.to_bits()),
             monitor_gain: AtomicU32::new(0.5011872f32.to_bits()),
+            metronome_enabled: AtomicU32::new(0),
+            metronome_bpm: AtomicU32::new(120),
+            metronome_beats: AtomicU32::new(4),
+            metronome_gain: AtomicU32::new(0.12589254f32.to_bits()),
             mute: AtomicU32::new(0),
             bypass: AtomicU32::new(0),
         };

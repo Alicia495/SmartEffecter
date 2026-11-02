@@ -97,6 +97,9 @@ fn refresh_effect(ui: &AppWindow, state: &mut AppState) {
     ui.set_instrument_db(state.settings.instrument_db);
     ui.set_mic_db(state.settings.mic_db);
     ui.set_mic_enabled(state.settings.mic_enabled);
+    ui.set_metronome_bpm(state.settings.metronome_bpm as f32);
+    ui.set_metronome_beats(state.settings.metronome_beats as f32);
+    ui.set_metronome_db(state.settings.metronome_db);
     ui.set_monitor_enabled(state.settings.monitor_enabled);
     ui.set_monitor_db(state.settings.monitor_db);
 }
@@ -124,6 +127,18 @@ fn changed(ui: &AppWindow, state: &mut AppState) {
     );
     state.controls.monitor_gain.store(
         10f32.powf(state.settings.monitor_db / 20.).to_bits(),
+        Ordering::Relaxed,
+    );
+    state
+        .controls
+        .metronome_bpm
+        .store(state.settings.metronome_bpm, Ordering::Relaxed);
+    state
+        .controls
+        .metronome_beats
+        .store(state.settings.metronome_beats, Ordering::Relaxed);
+    state.controls.metronome_gain.store(
+        10f32.powf(state.settings.metronome_db / 20.).to_bits(),
         Ordering::Relaxed,
     );
     state.controls.publish(&state.settings.tone);
@@ -323,6 +338,16 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         settings.switch_instrument(true);
     }
     let controls = Arc::new(SharedControls::new(&settings.tone));
+    controls
+        .metronome_bpm
+        .store(settings.metronome_bpm, Ordering::Relaxed);
+    controls
+        .metronome_beats
+        .store(settings.metronome_beats, Ordering::Relaxed);
+    controls.metronome_gain.store(
+        10f32.powf(settings.metronome_db / 20.).to_bits(),
+        Ordering::Relaxed,
+    );
     let (commands, events, worker) = audio::spawn_worker(controls.clone());
     let ui = AppWindow::new()?;
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
@@ -811,6 +836,41 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_metronome_changed(move || {
+            if let Some(ui) = weak.upgrade() {
+                let mut s = state.borrow_mut();
+                s.settings.metronome_bpm = ui.get_metronome_bpm().round().clamp(30., 300.) as u32;
+                s.settings.metronome_beats = ui.get_metronome_beats().round().clamp(1., 12.) as u32;
+                s.settings.metronome_db = ui.get_metronome_db().clamp(-60., 0.);
+                s.controls
+                    .metronome_enabled
+                    .store(u32::from(ui.get_metronome_enabled()), Ordering::Relaxed);
+                changed(&ui, &mut s);
+                ui.set_metronome_bpm(s.settings.metronome_bpm as f32);
+                ui.set_metronome_beats(s.settings.metronome_beats as f32);
+                s.last_edit = Some(Instant::now());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_open_logs(move || {
+            let result = std::fs::create_dir_all(crate::diagnostics::directory()).and_then(|_| {
+                std::process::Command::new("explorer.exe")
+                    .arg(crate::diagnostics::directory())
+                    .spawn()
+                    .map(|_| ())
+            });
+            if let Err(e) = result
+                && let Some(ui) = weak.upgrade()
+            {
+                ui.set_message(format!("ログフォルダーを開けません: {e}").into());
+            }
+        });
+    }
     let timer = slint::Timer::default();
     let weak = ui.as_weak();
     let timer_state = state.clone();
@@ -821,6 +881,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut live_step = 0u64;
     timer.start(slint::TimerMode::Repeated,Duration::from_millis(33),move||{let Some(ui)=weak.upgrade()else{return;};let mut s=timer_state.borrow_mut();
         while let Ok(event)=events.try_recv(){match event{
+            Event::LogStatus(result)=>{match result { Ok(())=>ui.set_log_status("診断ログ: 自動記録中".into()), Err(e)=>{ui.set_log_status("診断ログ: 保存エラー".into());ui.set_message(e.into());} }}
             Event::Devices(result)=>{ui.set_busy(false);match result{Ok(devices)=>{s.devices=devices;ui.set_device_names(strings(s.devices.iter().map(|d|d.name.clone())));let index=s.devices.iter().position(|d|d.name==s.settings.device).or_else(||s.devices.iter().position(|d|d.name.contains("M-Track"))).unwrap_or(0);ui.set_device_index(index as i32);device_options(&ui,&s,index);if s.devices.is_empty(){ui.set_status("ASIO機器なし".into());ui.set_message("AG03MK2 / M-TrackのUSB接続と公式ASIOドライバーを確認してください".into());}else{ui.set_status("接続待ち".into());}},Err(e)=>{ui.set_status("ASIO確認エラー".into());ui.set_message(e.into());}}}
             Event::Inputs(result)=>{match result {
                 Ok(mut inputs)=>{
@@ -913,6 +974,9 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         click(983.,116.);assert!(ui.get_wave_input());click(1040.,116.);assert!(!ui.get_wave_input());
         click(180.,351.);assert_eq!(ui.get_selected(),0);click(475.,351.);assert_eq!(ui.get_selected(),2,"effect selection must work by pointer");
         let before=ui.get_effects().row_data(2).unwrap().enabled;click(475.,383.);assert_ne!(ui.get_effects().row_data(2).unwrap().enabled,before,"on/off must be separate from selection");
+        ui.set_metronome_enabled(true);ui.set_metronome_bpm(97.);ui.set_metronome_beats(3.);ui.set_metronome_db(-24.);ui.invoke_metronome_changed();
+        assert_eq!(ui.get_metronome_bpm(),97.);assert_eq!(ui.get_metronome_beats(),3.);
+        ui.set_metronome_enabled(false);ui.invoke_metronome_changed();
         // Exercise the native pointer/key path, not only callback invocation.
         ui.invoke_param_edited(0,40.);
         let start=slint::LogicalPosition::new(409.,596.);
@@ -967,13 +1031,16 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(Settings::load().unwrap().output_device,audio::VIRTUAL_OUTPUT);
         assert_eq!(Settings::load().unwrap().monitor_device,"windows:default");assert!(Settings::load().unwrap().monitor_enabled);assert_eq!(Settings::load().unwrap().monitor_db,-9.);
         ui.invoke_preset_action(3,"".into());
+        assert_eq!(Settings::load().unwrap().metronome_bpm,97);
+        assert_eq!(Settings::load().unwrap().metronome_beats,3);
+        ui.set_settings_open(false);ui.set_page(1);save_png("artifacts/ui-smoke-metronome.png",&ui.window().take_snapshot().unwrap()).unwrap();ui.set_page(0);
         ui.set_message("".into());ui.set_settings_open(false);ui.set_dark(true);save_png("artifacts/ui-smoke-dark.png",&ui.window().take_snapshot().unwrap()).unwrap();
         ui.set_dark(false);ui.invoke_theme_changed(false);save_png("artifacts/ui-smoke-light.png",&ui.window().take_snapshot().unwrap()).unwrap();ui.set_settings_open(true);save_png("artifacts/ui-smoke-settings-light.png",&ui.window().take_snapshot().unwrap()).unwrap();
         ui.set_settings_open(false);ui.invoke_preset_action(0,"Theme persistence smoke".into());
         let saved=Settings::load().unwrap();assert!(!saved.dark);assert!(saved.guitar_tone.is_some());assert!(saved.bass_tone.is_some());
         ui.invoke_preset_action(3,"".into());
         ui.set_settings_open(false);ui.set_tuner_open(true);save_png("artifacts/ui-smoke-tuner.png",&ui.window().take_snapshot().unwrap()).unwrap();
-        std::fs::write("artifacts/ui-smoke.json",r#"{"passed":true,"checks":["pointer effect selection","pointer independent bypass","parameter edit","numeric edit","pointer mute","knob drag","knob keyboard","center numeric keyboard entry","scope source and timebase pointer controls","theme and instrument banks persist","collapsed amp level mapping","EQ expansion","Windows output selection persists","virtual output selection persists","bass monitor settings persist","factory preset","bass preset","mixer gain and microphone selection persistence","save and reload","rename and reload","delete and reload","dark light and tuner snapshots","instrument tabs preserve independent tones","sidebar mixer navigation","microphone processing switch and persistence","unit-aware output and mixer numeric edits"]}"#).unwrap();
+        std::fs::write("artifacts/ui-smoke.json",r#"{"passed":true,"checks":["pointer effect selection","pointer independent bypass","parameter edit","numeric edit","pointer mute","knob drag","knob keyboard","center numeric keyboard entry","scope source and timebase pointer controls","theme and instrument banks persist","collapsed amp level mapping","EQ expansion","Windows output selection persists","virtual output selection persists","bass monitor settings persist","factory preset","bass preset","mixer gain and microphone selection persistence","save and reload","rename and reload","delete and reload","dark light and tuner snapshots","instrument tabs preserve independent tones","sidebar mixer navigation","microphone processing switch and persistence","unit-aware output and mixer numeric edits","metronome BPM beats volume and persistence"]}"#).unwrap();
         let _=slint::quit_event_loop();
     });
     }

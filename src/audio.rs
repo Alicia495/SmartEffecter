@@ -25,6 +25,10 @@ pub struct Metrics {
     pub missing_frames: AtomicU64,
     pub overflow_frames: AtomicU64,
     pub errors: AtomicU64,
+    pub input_error_code: AtomicU32,
+    pub output_error_code: AtomicU32,
+    pub max_input_gap_us: AtomicU64,
+    pub max_output_gap_us: AtomicU64,
     pub input_blocks: AtomicU64,
     pub output_blocks: AtomicU64,
     pub deadline_misses: AtomicU64,
@@ -51,6 +55,10 @@ pub struct MetricsReport {
     pub missing_frames: u64,
     pub overflow_frames: u64,
     pub errors: u64,
+    pub input_error_code: u32,
+    pub output_error_code: u32,
+    pub max_input_gap_us: u64,
+    pub max_output_gap_us: u64,
     pub deadline_misses: u64,
     pub max_process_us: u64,
     pub driver_input_ms: f64,
@@ -74,6 +82,20 @@ fn mic_error_message(code: u32) -> Option<&'static str> {
         3 => Some("マイクの形式や接続が変更されました。再接続してください"),
         4 => Some("マイクが他のアプリで使用されています"),
         _ => Some("マイクの音声ドライバーでエラーが発生しました"),
+    }
+}
+// Numeric classification avoids formatting/allocating driver errors in callbacks.
+fn stream_error_code(error: &cpal::Error) -> u32 {
+    use cpal::ErrorKind;
+    match error.kind() {
+        ErrorKind::Xrun => 1,
+        ErrorKind::DeviceNotAvailable => 2,
+        ErrorKind::PermissionDenied => 3,
+        ErrorKind::StreamInvalidated => 4,
+        ErrorKind::DeviceBusy => 5,
+        ErrorKind::DeviceChanged => 6,
+        ErrorKind::RealtimeDenied => 7,
+        _ => 8,
     }
 }
 fn record_mic_error(metrics: &Metrics, error: &cpal::Error) {
@@ -108,6 +130,10 @@ impl Metrics {
             missing_frames: self.missing_frames.load(Ordering::Relaxed),
             overflow_frames: self.overflow_frames.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
+            input_error_code: self.input_error_code.load(Ordering::Relaxed),
+            output_error_code: self.output_error_code.load(Ordering::Relaxed),
+            max_input_gap_us: self.max_input_gap_us.load(Ordering::Relaxed),
+            max_output_gap_us: self.max_output_gap_us.load(Ordering::Relaxed),
             deadline_misses: self.deadline_misses.load(Ordering::Relaxed),
             max_process_us: self.max_process_us.load(Ordering::Relaxed),
             driver_input_ms: input,
@@ -581,6 +607,7 @@ impl Session {
                 .then_some(settings.mic_channel),
             instrument_gain: 10f32.powf(settings.instrument_db / 20.),
             mic_gain: 0.,
+            metronome: crate::metronome::Metronome::default(),
             processor: Processor::new(settings.sample_rate as f32, settings.tone),
             tone: settings.tone,
             controls,
@@ -596,12 +623,19 @@ impl Session {
             sample_count: 0,
         };
         let in_errors = metrics.clone();
+        let mut previous_input = None::<Instant>;
         let input_stream = device
             .build_input_stream_raw(
                 input_config,
                 input_format,
                 move |data, info| {
                     let start = Instant::now();
+                    if let Some(previous) = previous_input.replace(start) {
+                        capture.metrics.max_input_gap_us.fetch_max(
+                            start.duration_since(previous).as_micros() as u64,
+                            Ordering::Relaxed,
+                        );
+                    }
                     let stamp = info.timestamp();
                     if let Some(d) = stamp.callback.checked_duration_since(stamp.capture) {
                         capture
@@ -649,7 +683,10 @@ impl Session {
                     }
                     capture.metrics.input_blocks.fetch_add(1, Ordering::Relaxed);
                 },
-                move |_| {
+                move |error| {
+                    in_errors
+                        .input_error_code
+                        .store(stream_error_code(&error), Ordering::Relaxed);
                     in_errors.errors.fetch_add(1, Ordering::Relaxed);
                 },
                 None,
@@ -774,11 +811,19 @@ fn build_playback_stream(
         return Err(format!("未対応の出力形式: {format}"));
     }
     let out_errors = playback.metrics.clone();
+    let mut previous_output = None::<Instant>;
     let output_stream = device
         .build_output_stream_raw(
             config,
             format,
             move |data, info| {
+                let now = Instant::now();
+                if let Some(previous) = previous_output.replace(now) {
+                    playback.metrics.max_output_gap_us.fetch_max(
+                        now.duration_since(previous).as_micros() as u64,
+                        Ordering::Relaxed,
+                    );
+                }
                 let stamp = info.timestamp();
                 if let Some(d) = stamp.playback.checked_duration_since(stamp.callback) {
                     playback
@@ -811,7 +856,10 @@ fn build_playback_stream(
                     .output_blocks
                     .fetch_add(1, Ordering::Relaxed);
             },
-            move |_| {
+            move |error| {
+                out_errors
+                    .output_error_code
+                    .store(stream_error_code(&error), Ordering::Relaxed);
                 out_errors.errors.fetch_add(1, Ordering::Relaxed);
             },
             None,
@@ -834,6 +882,7 @@ struct Capture {
     mic_channel: Option<usize>,
     instrument_gain: f32,
     mic_gain: f32,
+    metronome: crate::metronome::Metronome,
     processor: Processor,
     tone: Tone,
     controls: Arc<SharedControls>,
@@ -910,9 +959,11 @@ impl Capture {
             self.point.high_in = input;
             self.point.low_out = (out[0] + out[1]) * 0.5 * self.instrument_gain;
             self.point.high_out = self.point.low_out;
+            let click = self.metronome.next(self.rate, &self.controls, mute);
             if let Some(monitor) = &mut self.monitor {
-                let samples =
-                    out.map(|s| (s * self.instrument_gain * self.monitor_gain).clamp(-1., 1.));
+                let samples = out.map(|s| {
+                    ((s * self.instrument_gain + click) * self.monitor_gain).clamp(-1., 1.)
+                });
                 if monitor.push(AudioFrame { samples, time }).is_err()
                     && let Some(metrics) = &self.monitor_metrics
                 {
@@ -942,6 +993,9 @@ impl Capture {
                 }
                 0.
             };
+            for sample in &mut out {
+                *sample += click;
+            }
             input_peak = input_peak.max(input.abs()).max(mic.abs());
             output_peak = output_peak.max(out[0].abs()).max(out[1].abs());
             if raw.abs() >= 0.999 || input.abs() >= 1. || mic.abs() >= 0.999 {
@@ -1154,6 +1208,7 @@ pub enum Command {
     Shutdown,
 }
 pub enum Event {
+    LogStatus(Result<(), String>),
     Devices(Result<Vec<DeviceInfo>, String>),
     Outputs(Result<Vec<OutputDeviceInfo>, String>),
     Inputs(Result<Vec<OutputDeviceInfo>, String>),
@@ -1171,7 +1226,44 @@ pub fn spawn_worker(
     let (events, out) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let mut session: Option<Session> = None;
-        while let Ok(command) = rx.recv() {
+        let mut logger = match crate::diagnostics::Logger::open() {
+            Ok(log) => {
+                let _ = events.send(Event::LogStatus(Ok(())));
+                Some(log)
+            }
+            Err(e) => {
+                let _ = events.send(Event::LogStatus(Err(format!(
+                    "診断ログを開始できません: {e}"
+                ))));
+                None
+            }
+        };
+        crate::diagnostics::record(
+            &mut logger,
+            &events,
+            "app_start",
+            serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"os":std::env::consts::OS,"arch":std::env::consts::ARCH}),
+        );
+        let mut last_log = Instant::now();
+        let mut logged_tone = Tone::default();
+        loop {
+            if last_log.elapsed() >= Duration::from_secs(1) {
+                if let Some(active) = &session {
+                    controls.snapshot(&mut logged_tone);
+                    crate::diagnostics::record(
+                        &mut logger,
+                        &events,
+                        "metrics",
+                        serde_json::json!({"main":active.metrics.report(),"monitor":active.monitor_metrics.as_ref().map(|m|m.report()), "metronome_enabled":controls.metronome_enabled.load(Ordering::Relaxed), "metronome_bpm":controls.metronome_bpm.load(Ordering::Relaxed),"tone":logged_tone,"mute":controls.mute.load(Ordering::Relaxed),"bypass":controls.bypass.load(Ordering::Relaxed)}),
+                    );
+                }
+                last_log = Instant::now();
+            }
+            let command = match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(command) => command,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => break,
+            };
             match command {
                 Command::Scan => {
                     if session.is_none() {
@@ -1181,6 +1273,20 @@ pub fn spawn_worker(
                     }
                 }
                 Command::Start(settings) => {
+                    if let Some(active) = &session {
+                        crate::diagnostics::record(
+                            &mut logger,
+                            &events,
+                            "before_restart",
+                            serde_json::json!({"main":active.metrics.report(),"monitor":active.monitor_metrics.as_ref().map(|m|m.report())}),
+                        );
+                    }
+                    crate::diagnostics::record(
+                        &mut logger,
+                        &events,
+                        "start_requested",
+                        serde_json::json!({"device":settings.device,"output":settings.output_device,"sample_rate":settings.sample_rate,"buffer":settings.buffer,"input_channel":settings.input_channel,"mic_enabled":settings.mic_enabled,"mic_device":settings.mic_device,"mic_channel":settings.mic_channel,"monitor_enabled":settings.monitor_enabled,"monitor_device":settings.monitor_device,"tone":settings.tone}),
+                    );
                     if session.is_some() {
                         controls.mute.store(1, Ordering::Relaxed);
                         std::thread::sleep(Duration::from_millis(10));
@@ -1191,21 +1297,49 @@ pub fn spawn_worker(
                         Ok(mut next) => {
                             let feed = next.feed.take().unwrap();
                             let info = next.info.clone();
+                            crate::diagnostics::record(
+                                &mut logger,
+                                &events,
+                                "started",
+                                serde_json::json!({"info":info}),
+                            );
                             session = Some(next);
                             let _ = events.send(Event::Started(Ok((feed, info))));
                         }
                         Err(error) => {
+                            crate::diagnostics::record(
+                                &mut logger,
+                                &events,
+                                "start_failed",
+                                serde_json::json!({"error":error}),
+                            );
                             let _ = events.send(Event::Started(Err(error)));
                         }
                     }
                 }
                 Command::Stop => {
+                    if let Some(active) = &session {
+                        crate::diagnostics::record(
+                            &mut logger,
+                            &events,
+                            "stopped",
+                            serde_json::json!({"main":active.metrics.report(),"monitor":active.monitor_metrics.as_ref().map(|m|m.report())}),
+                        );
+                    }
                     controls.mute.store(1, Ordering::Relaxed);
                     std::thread::sleep(Duration::from_millis(10));
                     drop(session.take());
                     let _ = events.send(Event::Stopped);
                 }
                 Command::Shutdown => {
+                    if let Some(active) = &session {
+                        crate::diagnostics::record(
+                            &mut logger,
+                            &events,
+                            "shutdown",
+                            serde_json::json!({"main":active.metrics.report(),"monitor":active.monitor_metrics.as_ref().map(|m|m.report())}),
+                        );
+                    }
                     controls.mute.store(1, Ordering::Relaxed);
                     std::thread::sleep(Duration::from_millis(10));
                     break;
@@ -1225,9 +1359,14 @@ mod tests {
         let device = devices()
             .unwrap()
             .into_iter()
-            .find(|d| d.inputs >= 2 && d.rates.contains(&48000))
+            .find(|d| d.inputs >= 2 && !d.rates.is_empty())
             .unwrap();
         let settings = Settings {
+            sample_rate: if device.rates.contains(&48000) {
+                48000
+            } else {
+                device.rates[0]
+            },
             device: device.name,
             input_channel: 1,
             buffer: 32,
@@ -1246,7 +1385,12 @@ mod tests {
             next.mic_device = source.into();
             next.mic_channel = channel;
             commands.send(Command::Start(Box::new(next))).unwrap();
-            let event = events.recv_timeout(Duration::from_secs(10)).unwrap();
+            let event = loop {
+                let event = events.recv_timeout(Duration::from_secs(10)).unwrap();
+                if !matches!(event, Event::LogStatus(_)) {
+                    break event;
+                }
+            };
             let Event::Started(result) = event else {
                 panic!("expected Started");
             };
@@ -1458,6 +1602,7 @@ mod tests {
             mic_channel: None,
             instrument_gain: 1.,
             mic_gain: 0.,
+            metronome: crate::metronome::Metronome::default(),
             processor: Processor::new(48000., tone),
             tone,
             controls,
@@ -1610,5 +1755,34 @@ mod tests {
             playback.run(&mut output, cpal::StreamInstant::ZERO);
         }
         assert!(output.iter().all(|v| v.abs() < 1e-5));
+        // Click reaches both outputs while the instrument-only scope remains silent.
+        capture.controls.mute.store(0, Ordering::Relaxed);
+        capture
+            .controls
+            .metronome_enabled
+            .store(1, Ordering::Relaxed);
+        capture.microphone = None;
+        let silence = [0f32; 128];
+        let mut main_peak = 0f32;
+        let mut monitor_peak = 0f32;
+        while wave_rx.pop().is_ok() {}
+        while monitor_rx.pop().is_ok() {}
+        let allocations = crate::allocation_check::count(|| {
+            for _ in 0..500 {
+                capture.run(&silence, cpal::StreamInstant::ZERO);
+                playback.run(&mut output, cpal::StreamInstant::ZERO);
+                for sample in output {
+                    main_peak = main_peak.max(sample.abs());
+                }
+                while let Ok(frame) = monitor_rx.pop() {
+                    monitor_peak = monitor_peak.max(frame.samples[0].abs());
+                }
+                while let Ok(point) = wave_rx.pop() {
+                    assert!(point.high_out.abs() < 1e-5);
+                }
+            }
+        });
+        assert_eq!(allocations, 0);
+        assert!(main_peak > 0.03 && monitor_peak > 0.03);
     }
 }

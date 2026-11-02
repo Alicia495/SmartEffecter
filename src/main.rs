@@ -1,7 +1,9 @@
 #![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 mod app;
 mod audio;
+mod diagnostics;
 mod dsp;
+mod metronome;
 mod scope;
 mod state;
 slint::include_modules!();
