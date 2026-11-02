@@ -4,9 +4,9 @@ Windows用のギター・ベースエフェクター。PCのマイクと合成�
 
 ## ダウンロード
 
-[**v1.0をダウンロード**](https://github.com/Alicia495/SmartEffecter/releases/tag/v1.0)
+[**v1.1をダウンロード**](https://github.com/Alicia495/SmartEffecter/releases/tag/v1.1)
 
-`SmartEffecter-v1.0-windows-x64.zip` を展開し、`GuitarSmartEffecter.exe` を起動してください。インストール不要です。
+`SmartEffecter-v1.1-windows-x64.zip` を展開し、`GuitarSmartEffecter.exe` を起動してください。インストール不要です。
 Windows 10 / 11（x64）と、入力機器のASIOドライバーが必要です。
 
 ## 使い方

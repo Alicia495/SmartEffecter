@@ -15,9 +15,9 @@ cargo clippy --all-targets --locked -- -D warnings
 
 `dist/GuitarSmartEffecter.exe` と依存ライセンスが生成されます。配布ビルドは、このPCのWindows App Controlとの互換性のため `cargo rustc --locked --bin guitar-smart-effecter -- -C opt-level=3` を使用します。アプリとDSPは最適化し、依存クレートはdevプロファイルです。一般的な環境では `cargo build --release --locked` も利用できます。
 
-## v1.0の対応ソース
+## v1.1の対応ソース
 
-リリースの `SmartEffecter-v1.0-source.tar.gz` には、アプリのソース、Cargo.lockに対応する依存クレート、ASIO SDKのソース、ビルドスクリプトを含めます。Rust、MSVC、Windows SDK、LLVMなどの開発ツールは別途用意してください。
+リリースの `SmartEffecter-v1.1-source.tar.gz` には、アプリのソース、Cargo.lockに対応する依存クレート、ASIO SDKのソース、ビルドスクリプトを含めます。Rust、MSVC、Windows SDK、LLVMなどの開発ツールは別途用意してください。
 
 展開したソース内で次を設定すると、依存クレートとASIO SDKを追加ダウンロードせずにビルドできます。
 

@@ -46,6 +46,9 @@ def main():
             if path.is_file():
                 archive.write(path, path.relative_to(stage))
 
+    executable = output / "GuitarSmartEffecter.exe"
+    shutil.copy2(app / "GuitarSmartEffecter.exe", executable)
+
     source = stage / f"SmartEffecter-{tag}-source"
     source.mkdir()
     for name in run("git", "ls-files", "-z").split("\0"):
@@ -87,8 +90,8 @@ def main():
     with tarfile.open(source_tar, "w:gz", compresslevel=6) as archive:
         archive.add(source, arcname=source.name)
     checksums = output / "SHA256SUMS.txt"
-    checksums.write_text("".join(f"{digest(p)}  {p.name}\n" for p in [app_zip, source_tar]), encoding="utf-8")
-    print(json.dumps({**manifest, "assets": [{"path": str(p), "bytes": p.stat().st_size} for p in [app_zip, source_tar, checksums]]}, indent=2))
+    checksums.write_text("".join(f"{digest(p)}  {p.name}\n" for p in [app_zip, executable, source_tar]), encoding="utf-8")
+    print(json.dumps({**manifest, "assets": [{"path": str(p), "bytes": p.stat().st_size} for p in [app_zip, executable, source_tar, checksums]]}, indent=2))
 
 
 if __name__ == "__main__":
